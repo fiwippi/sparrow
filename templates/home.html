@@ -41,6 +41,10 @@
     		margin-block: 2.6rem;
     		width: 50%;
     	}
+
+      select {
+        font-size: 13px;
+      }
     
       .grid {
         display: grid;
@@ -69,12 +73,12 @@
         <h2>Sparrow</h2>
         <p>
           <label for="input-device-select">Input device:</label>
-          <select name="input-device" id="input-device-select" hx-get="/api/v1/devices/input" hx-trigger="load,change"/>
+          <select name="device" hx-get="/api/v1/devices/input" hx-trigger="load,change"/>
           </select>
         </p>
         <p>
           <label for="output-device-select">Output device:</label>
-          <select name="output-device" id="output-device-select"  hx-get="/api/v1/devices/output" hx-trigger="load,change">
+          <select name="device" hx-get="/api/v1/devices/output" hx-trigger="load,change">
           </select>
         </p>
       </div>

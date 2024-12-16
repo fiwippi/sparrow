@@ -1,0 +1,3 @@
+{% for d in devices %}
+  <option value="{{ d.name }}" {% if d.selected %}selected{% endif %}>{{ d.name }}</option>
+{% endfor %}
