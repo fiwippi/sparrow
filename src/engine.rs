@@ -273,12 +273,13 @@ impl Daemon {
 }
 
 pub mod audio {
-    use std::fmt;
+    use std::{fmt, sync::Mutex};
 
     use cpal::{
         self,
         traits::{DeviceTrait, HostTrait, StreamTrait},
     };
+    use num_complex::Complex;
     use ringbuf::{
         traits::{Consumer, Producer, Split},
         HeapRb,
@@ -395,8 +396,50 @@ pub mod audio {
                 producer.try_push(0.0).unwrap();
             }
 
+            let input_buffer = Mutex::new(Vec::<f32>::new());
             let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                producer.push_slice(data);
+                let samples_written = producer.push_slice(data);
+                if samples_written > 0 {
+                    let mut buf = input_buffer.lock().unwrap();
+                    buf.extend_from_slice(&data[..samples_written]);
+                    if buf.len() < 8096 {
+                        // TODO Make configurable
+                        return;
+                    }
+
+                    // Audio is interleaved, LRLRLR, so to mix
+                    // down the samples into mono we do L+R/2
+                    let mut mono: Vec<Complex<f32>> = buf
+                        .chunks_exact(2)
+                        .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
+                        .map(|re| Complex::new(re, 0.0))
+                        .collect();
+
+                    fourier::create_fft_f32(mono.len()).fft_in_place(&mut mono);
+
+                    // We only consider the first half of
+                    // the samples because the FFT is mirrored
+                    let magnitudes: Vec<f32> =
+                        mono[..mono.len() / 2].iter().map(|c| c.norm()).collect();
+
+                    let index = {
+                        let mut max = 0.0;
+                        let mut index = 0;
+
+                        for (i, &m) in magnitudes.iter().enumerate() {
+                            if m > max {
+                                max = m;
+                                index = i;
+                            }
+                        }
+
+                        index as f32
+                    };
+                    let freq_bin = config.sample_rate.0 as f32 / mono.len() as f32;
+                    let freq = index * freq_bin;
+
+                    buf.clear();
+                }
             };
             let output_data_fn = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 for sample in data {

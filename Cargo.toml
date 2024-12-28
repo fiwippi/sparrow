@@ -8,7 +8,9 @@ anyhow = "1.0.94"
 askama = "0.12.1"
 axum = { version = "0.7.9", features = ["query"] }
 cpal = "0.15.3"
+fourier = "0.1.0"
 http = "1.2.0"
+num-complex = "0.2.4"
 ringbuf = "0.4.7"
 serde = { version = "1.0.216", features = ["derive"] }
 slog = "2.7.0"
