@@ -1,0 +1,14 @@
+{% if logs.len() == 0 %}
+  <i>Empty.</i>
+{% else %}
+  <p><i>Logs are shown in reverse order, (most-recent at the top).</i></p>
+  <table>
+    <thead><tr><th>Message</th></tr></thead>
+    <tbody>
+    {% for (msg, _) in logs %}
+      <tr><td>{{ msg }}</td></tr>
+    {% endfor %}
+    </tbody>
+  <table>
+{% endif %}
+

@@ -1,29 +1,30 @@
-mod audio;
+mod engine;
 mod ui;
 
-use slog::{o, Drain}; // TODO Use the async handler for slog_scope
+use slog::{o, Drain};
 use slog_scope::error;
-use tokio;
+use tokio::{self, sync::mpsc};
 
 #[tokio::main]
 async fn main() {
     let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
     let logger = slog::Logger::root(drain, o!());
     let _guard = slog_scope::set_global_logger(logger); // We must hold the guard due to how slog_scope works
 
-    let daemon = audio::Daemon::new();
-    let (daemon_handle, daemon_tx) = daemon.run();
-    let server = ui::Server::new(daemon_tx.clone());
-    if let Err(e) = server.run().await {
-        error!("Failed to run server"; "error" => format!("{e}"));
-    }
+    let (daemon_events_tx, daemon_events_rx) = mpsc::channel::<anyhow::Error>(32);
+    let daemon = match engine::Daemon::new() {
+        Ok(daemon) => daemon,
+        Err(e) => {
+            error!("Failed to create daemon"; "error" => format!("{e}"));
+            return;
+        }
+    };
+    let server = ui::Server::new(daemon.tx.clone(), daemon_events_rx);
 
-    // TODO Graceful shutdown for HTTP server and daemon
-    if let Err(e) = daemon_tx.shutdown().await {
-        error!("Failed to shutdown daemon"; "error" => format!("{e}"));
-    }
-    if let Err(e) = daemon_handle.await {
-        error!("Failed to join on daemon"; "error" => format!("{e}"));
-    }
+    if let Err(e) = tokio::try_join!(server.run(), daemon.run(daemon_events_tx)) {
+        error!("Failed to run server/daemon"; "error" => format!("{e}"));
+        return;
+    };
 }

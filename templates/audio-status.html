@@ -1,0 +1,4 @@
+Status: <b>{{ status }}</b>
+
+{% let err_msg = err_message.unwrap_or("") %}
+<div id="audio-status-err" hx-swap-oob="innerHTML">{{ err_msg }}</div>

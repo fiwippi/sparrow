@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width" />
     <title>Sparrow</title>
     <script src="/assets/htmx.min.js"></script>
+    <script src="/assets/sse.js"></script>
     <style>
     	html {
     		font-size: 18px;
@@ -18,15 +19,29 @@
     		color: hsl(0, 0%, 24%);
     	}
 
+      hgroup {
+        text-align: left;
+        padding-left: 10px;
+        padding-bottom: 1px;
+        border-left: 10px solid #8c4736;
+        border-bottom: 2px solid #8c4636;
+      }
+
+      hgroup h2, hgroup h3 {
+        margin-bottom: 0;
+      }
+
     	a {
     		color: inherit;
     		text-decoration: none;
     		border-bottom: 2px solid blue;
     		font-weight: 500;
     	}
+
     	a:visited {
     		border-bottom-color: purple;
     	}
+
     	a:hover {
     		background-color: hsl(60, 100%, 85%);
     		color: oklch(40% 0 0);
@@ -42,10 +57,11 @@
     		width: 50%;
     	}
 
-      select {
-        font-size: 14px;
+      select, button {
+        font-size: 15px;
+        margin-left: 5px;
       }
-    
+
       .grid {
         display: grid;
         grid-template-columns: 1fr min(31em, 100%) 5fr;
@@ -57,29 +73,74 @@
         padding-inline: 1rem;
       }
 
-    	@media (width < 500px) {
-    		pre {
-    			margin-inline: 0;
-    		}
-    		pre code {
-    			font-size: 14px;
-    		}
+      .error {
+        font-size: 16px;
+        font-weight: bold;
+        padding-left: 10px;
+        margin-left: 10px;
+        border-left: 10px solid #ff6d6d;
+      }
+
+      .error-box {
+        display: flex;
+        flex-direction: column;
+        row-gap: 10px;
+      }
+
+      table {
+    		margin: 0px auto;
+    		border: 1px solid black;
+    		border-collapse: collapse;
+    		table-layout: fixed;
+        width: 95%
+    	}
+
+    	th {
+    		font-weight: 600;
+    	}
+
+    	th,
+    	td {
+    		border: 1px solid black;
+    		padding: 2px 5px;
     	}
     </style>
   </head>
   <body>
     <div class="grid">
       <div class="middle">
-        <h2>Sparrow</h2>
+        <hgroup>
+          <h2>Sparrow</h2>
+        </hgroup>
+        <hgroup>
+          <h3>Audio</h3>
+        </hgroup>
         <p>
-          <label for="input-device-select">Input device:</label>
-          <select name="device" hx-get="/api/v1/devices/input" hx-trigger="load,change"/>
+          <label for="audio-input-select">Input device:</label>
+          <select id="audio-input-select" name="device" hx-get="/api/v1/audio/devices/input" hx-trigger="load,change">
           </select>
+          <div class="error" id="audio-input-err"></div>
         </p>
-        <p>
-          <label for="output-device-select">Output device:</label>
-          <select name="device" hx-get="/api/v1/devices/output" hx-trigger="load,change">
+        <p id="output-audio">
+          <label for="audio-output-select">Output device:</label>
+          <select id="audio-output-select" name="device" hx-get="/api/v1/audio/devices/output" hx-trigger="load,change">
           </select>
+          <div class="error" id="audio-output-err"></div>
+        </p>
+        <p hx-sync="this">
+          <label for="audio-status-button" hx-get="/api/v1/audio/status" hx-trigger="load,audioStatusToggled from:body"></label>
+          <button id="audio-status-button" hx-get="/api/v1/audio/status/toggle" hx-trigger="click" hx-swap="none">
+            Toggle
+          </button>
+          <div class="error-box">
+            <div class="error" id="audio-status-err"></div>
+            <div class="error" id="audio-status-toggle-err"></div>
+          </div>
+        </p>
+        <hgroup>
+          <h3>Logs</h3>
+        </hgroup>
+        <p hx-get="/api/v1/logs" hx-trigger="load,every 5s">
         </p>
       </div>
     </div>

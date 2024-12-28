@@ -1,0 +1,6 @@
+{% for d in devices %}
+  <option value="{{ d.name }}" {% if d.selected %}selected{% endif %}>{{ d.name }}</option>
+{% endfor %}
+
+{% let err_msg = err_message.unwrap_or("") %}
+<div id="audio-input-err" hx-swap-oob="innerHTML">{{ err_msg }}</div>
