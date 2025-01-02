@@ -6,18 +6,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::engine::{self, audio};
+use crate::engine::{self, audio, led};
 
 use askama::Template;
 use axum::{
     body::{Body, Bytes},
-    extract::{Query, Request, State},
+    extract::{Path, Query, Request, State},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::get,
-    Router,
+    routing::{delete, get, patch, post},
+    Form, Router,
 };
-use http::{header, status::StatusCode, HeaderValue};
+use http::{header, status::StatusCode, HeaderMap, HeaderValue};
+use palette::{FromColor, Oklch, Srgb};
 use serde::{de, Deserialize, Deserializer};
 use slog_scope::{error, info};
 use tokio::{signal, sync::mpsc};
@@ -110,6 +111,12 @@ where
         None | Some("") => Ok(None),
         Some(s) => FromStr::from_str(s).map_err(de::Error::custom).map(Some),
     }
+}
+
+pub fn format_colour(colour: &Oklch) -> String {
+    let srgb: Srgb<u8> = Srgb::from_color(colour.clone()).into_format();
+    let hex = format!("#{:02x}{:02x}{:02x}", srgb.red, srgb.green, srgb.blue);
+    hex
 }
 
 // -- Templates
@@ -376,10 +383,333 @@ fn api_routes(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<eng
         HtmlTemplate(LogsTemplate { logs }).into_response()
     };
 
+    /// When we GET the list of gradients, we use this
+    /// query parameter to request to change the current
+    /// gradient by supplying its name
+    #[derive(Deserialize)]
+    struct ChangeGradientRequest {
+        #[serde(default, deserialize_with = "empty_string_as_none")]
+        gradient: Option<String>,
+    }
+
+    #[derive(Template)]
+    #[template(path = "gradients.html")]
+    struct GradientsTemplate<'a> {
+        gradients: Vec<led::GradientInfo>,
+        // We pre-process the selected gradient in the
+        // Rust code because it isn't working in the
+        // askama template for some reason
+        selected_gradient: Option<led::GradientInfo>,
+        err_message: Option<&'a str>,
+    }
+
+    async fn get_led_gradients(
+        State(engine_tx): State<engine::Tx>,
+        change_request: Query<ChangeGradientRequest>,
+    ) -> impl IntoResponse {
+        let set_gradient_res = if let Some(gradient) = change_request.0.gradient {
+            engine_tx.set_current_gradient(gradient).await
+        } else {
+            Ok(())
+        };
+        let list_gradients_res = engine_tx.list_gradients().await;
+
+        let template = match (set_gradient_res, list_gradients_res) {
+            (Ok(_), Ok(gradients)) => {
+                let selected_gradient = gradients.iter().find(|g| g.selected).map(|g| g.clone());
+                GradientsTemplate {
+                    gradients,
+                    selected_gradient,
+                    err_message: None,
+                }
+            }
+            (Err(e), Ok(gradients)) => {
+                let selected_gradient = gradients.iter().find(|g| g.selected).map(|g| g.clone());
+                error!("Failed to switch gradient"; "error" => format!("{e}"));
+                GradientsTemplate {
+                    gradients,
+                    selected_gradient,
+                    err_message: Some("Failed to switch gradient."),
+                }
+            }
+            (Ok(_), Err(e)) => {
+                error!("Failed to list gradients"; "error" => format!("{e}"));
+                GradientsTemplate {
+                    gradients: vec![],
+                    selected_gradient: None,
+                    err_message: Some("Switched gradient, but failed to reload the available gradients. Please refresh the page."),
+                }
+            }
+            (Err(left), Err(right)) => {
+                error!("Failed to switch gradient"; "error" => format!("{left}"));
+                error!("Failed to list gradients"; "error" => format!("{right}"));
+                GradientsTemplate {
+                    gradients: vec![],
+                    selected_gradient: None,
+                    err_message: Some("Failed to switch gradient and reload the available gradients. Please refresh the page."),
+                }
+            }
+        };
+        HtmlTemplate(template).into_response()
+    }
+
+    #[derive(Template)]
+    #[template(path = "gradients-change.html")]
+    struct GradientsChangeTemplate<'a> {
+        err_message: Option<&'a str>,
+    }
+
+    async fn add_led_gradient(
+        State(engine_tx): State<engine::Tx>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        let name = match headers
+            .get("HX-Prompt")
+            .map(|h| h.to_str().unwrap_or_default())
+        {
+            Some("") | None => {
+                return HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Gradient must have a name."),
+                })
+                .into_response();
+            }
+            Some(n) => n.to_string(),
+        };
+
+        let resp = match engine_tx
+            .add_gradient(name, led::Gradient::new(), false)
+            .await
+        {
+            Ok(_) => {
+                let template = GradientsChangeTemplate { err_message: None };
+                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
+                resp.headers_mut().insert(
+                    "HX-Trigger-After-Settle",
+                    HeaderValue::from_static("gradientAdded"),
+                );
+                resp
+            }
+            Err(e) => {
+                error!("Failed to add gradient"; "error" => format!("{e}"));
+                HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Failed to add gradient."),
+                })
+                .into_response()
+            }
+        };
+        resp
+    }
+
+    async fn delete_led_gradient(
+        State(engine_tx): State<engine::Tx>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        let name = match headers
+            .get("HX-Prompt")
+            .map(|h| h.to_str().unwrap_or_default())
+        {
+            Some("") | None => {
+                return HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Gradient must have a name."),
+                })
+                .into_response();
+            }
+            Some(n) => n.to_string(),
+        };
+
+        let resp = match engine_tx.delete_gradient(name).await {
+            Ok(_) => {
+                let template = GradientsChangeTemplate { err_message: None };
+                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
+                resp.headers_mut().insert(
+                    "HX-Trigger-After-Settle",
+                    HeaderValue::from_static("gradientDeleted"),
+                );
+                resp
+            }
+            Err(e) => {
+                error!("Failed to delete gradient"; "error" => format!("{e}"));
+                HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Failed to delete gradient."),
+                })
+                .into_response()
+            }
+        };
+        resp
+    }
+
+    async fn add_colour(
+        State(engine_tx): State<engine::Tx>,
+        Path(name): Path<String>,
+    ) -> impl IntoResponse {
+        let operation = match engine_tx.get_gradient(name.clone()).await {
+            Ok(mut gradient) => {
+                gradient.add_colour(Oklch::new(0.0, 0.0, 0.0));
+                engine_tx.add_gradient(name, gradient, true).await
+            }
+            Err(e) => Err(e),
+        };
+
+        let resp = match operation {
+            Ok(_) => {
+                let template = GradientsChangeTemplate { err_message: None };
+                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
+                resp.headers_mut().insert(
+                    "HX-Trigger-After-Settle",
+                    HeaderValue::from_static("gradientEdited"),
+                );
+                resp
+            }
+            Err(e) => {
+                error!("Failed to add colour"; "error" => format!("{e}"));
+                HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Failed to add colour."),
+                })
+                .into_response()
+            }
+        };
+        resp
+    }
+
+    async fn delete_colour(
+        State(engine_tx): State<engine::Tx>,
+        Path((name, index)): Path<(String, usize)>,
+    ) -> impl IntoResponse {
+        let operation = match engine_tx
+            .get_gradient(name.clone())
+            .await
+            .and_then(|mut g| {
+                g.delete_colour(index)?;
+                Ok(g)
+            }) {
+            Ok(gradient) => engine_tx.add_gradient(name, gradient, true).await,
+            Err(e) => Err(e),
+        };
+
+        let resp = match operation {
+            Ok(_) => {
+                let template = GradientsChangeTemplate { err_message: None };
+                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
+                resp.headers_mut().insert(
+                    "HX-Trigger-After-Settle",
+                    HeaderValue::from_static("gradientEdited"),
+                );
+                resp
+            }
+            Err(e) => {
+                error!("Failed to delete colour"; "error" => format!("{e}"));
+                HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Failed to delete colour."),
+                })
+                .into_response()
+            }
+        };
+        resp
+    }
+
+    #[derive(Deserialize)]
+    struct ColourValue {
+        value: String,
+    }
+
+    async fn edit_colour_value(
+        State(engine_tx): State<engine::Tx>,
+        Path((name, index)): Path<(String, usize)>,
+        Form(cv): Form<ColourValue>,
+    ) -> impl IntoResponse {
+        let operation = match engine_tx
+            .get_gradient(name.clone())
+            .await
+            .and_then(|mut g| {
+                let srgb: Srgb<f32> = Srgb::from_str(&cv.value)?.into_format();
+                let hcl = Oklch::from_color(srgb);
+                g.edit_colour_value(index, hcl)?;
+                Ok(g)
+            }) {
+            Ok(gradient) => engine_tx.add_gradient(name, gradient, true).await,
+            Err(e) => Err(e),
+        };
+
+        let resp = match operation {
+            Ok(_) => {
+                let template = GradientsChangeTemplate { err_message: None };
+                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
+                resp.headers_mut().insert(
+                    "HX-Trigger-After-Settle",
+                    HeaderValue::from_static("gradientEdited"),
+                );
+                resp
+            }
+            Err(e) => {
+                error!("Failed to edit colour value"; "error" => format!("{e}"));
+                HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Failed to edit colour value."),
+                })
+                .into_response()
+            }
+        };
+        resp
+    }
+
+    #[derive(Deserialize)]
+    struct ColourPosition {
+        position: f32,
+    }
+
+    async fn edit_colour_position(
+        State(engine_tx): State<engine::Tx>,
+        Path((name, index)): Path<(String, usize)>,
+        Form(cp): Form<ColourPosition>,
+    ) -> impl IntoResponse {
+        let operation = match engine_tx
+            .get_gradient(name.clone())
+            .await
+            .and_then(|mut g| {
+                g.edit_colour_position(index, cp.position)?;
+                Ok(g)
+            }) {
+            Ok(gradient) => engine_tx.add_gradient(name, gradient, true).await,
+            Err(e) => Err(e),
+        };
+
+        let resp = match operation {
+            Ok(_) => {
+                let template = GradientsChangeTemplate { err_message: None };
+                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
+                resp.headers_mut().insert(
+                    "HX-Trigger-After-Settle",
+                    HeaderValue::from_static("gradientEdited"),
+                );
+                resp
+            }
+            Err(e) => {
+                error!("Failed to edit colour position"; "error" => format!("{e}"));
+                HtmlTemplate(GradientsChangeTemplate {
+                    err_message: Some("Failed to edit colour position."),
+                })
+                .into_response()
+            }
+        };
+        resp
+    }
+
     Router::new()
         .route("/audio/devices/input", get(get_audio_inputs))
         .route("/audio/devices/output", get(get_audio_outputs))
         .route("/audio/status", get(get_audio_status))
         .route("/audio/status/toggle", get(toggle_audio_status))
+        .route("/led/gradients", get(get_led_gradients))
+        .route("/led/gradients", post(add_led_gradient))
+        .route("/led/gradients", delete(delete_led_gradient))
+        .route("/led/gradients/:name/colours", post(add_colour))
+        .route("/led/gradients/:name/colours/:index", delete(delete_colour))
+        .route(
+            "/led/gradients/:name/colours/:index/value",
+            patch(edit_colour_value),
+        )
+        .route(
+            "/led/gradients/:name/colours/:index/position",
+            patch(edit_colour_position),
+        )
         .route("/logs", get(get_logs))
 }

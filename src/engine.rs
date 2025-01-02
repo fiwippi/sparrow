@@ -12,13 +12,50 @@ type Ack<T> = oneshot::Sender<anyhow::Result<T>>; // TODO Replace use of anyhow:
 
 #[derive(Debug)]
 pub enum Command {
-    ListAudioInputs { tx: Ack<Vec<audio::DeviceInfo>> },
-    ListAudioOutputs { tx: Ack<Vec<audio::DeviceInfo>> },
-    SetAudioInput { device_name: String, tx: Ack<()> },
-    SetAudioOutput { device_name: String, tx: Ack<()> },
-    GetAudioStatus { tx: Ack<PlaybackStatus> },
-    ToggleAudioStatus { tx: Ack<()> },
-    Shutdown { tx: Ack<()> },
+    ListAudioInputs {
+        tx: Ack<Vec<audio::DeviceInfo>>,
+    },
+    ListAudioOutputs {
+        tx: Ack<Vec<audio::DeviceInfo>>,
+    },
+    SetAudioInput {
+        device_name: String,
+        tx: Ack<()>,
+    },
+    SetAudioOutput {
+        device_name: String,
+        tx: Ack<()>,
+    },
+    GetAudioStatus {
+        tx: Ack<PlaybackStatus>,
+    },
+    ToggleAudioStatus {
+        tx: Ack<()>,
+    },
+    ListGradients {
+        tx: Ack<Vec<led::GradientInfo>>,
+    },
+    SetCurrentGradient {
+        name: String,
+        tx: Ack<()>,
+    },
+    GetGradient {
+        name: String,
+        tx: Ack<led::Gradient>,
+    },
+    AddGradient {
+        name: String,
+        gradient: led::Gradient,
+        overwrite: bool,
+        tx: Ack<()>,
+    },
+    DeleteGradient {
+        name: String,
+        tx: Ack<()>,
+    },
+    Shutdown {
+        tx: Ack<()>,
+    },
 }
 
 #[derive(Clone)]
@@ -79,6 +116,64 @@ impl Tx {
         Ok(())
     }
 
+    pub async fn list_gradients(&self) -> anyhow::Result<Vec<led::GradientInfo>> {
+        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = (Command::ListGradients { tx }, rx);
+
+        self.0.send(tx).await?;
+        let gradients = rx.await??;
+        Ok(gradients)
+    }
+
+    pub async fn set_current_gradient(&self, name: String) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = (Command::SetCurrentGradient { name, tx }, rx);
+
+        self.0.send(tx).await?;
+        rx.await??;
+        Ok(())
+    }
+
+    pub async fn get_gradient(&self, name: String) -> anyhow::Result<led::Gradient> {
+        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = (Command::GetGradient { name, tx }, rx);
+
+        self.0.send(tx).await?;
+        let gradient = rx.await??;
+        Ok(gradient)
+    }
+
+    pub async fn add_gradient(
+        &self,
+        name: String,
+        gradient: led::Gradient,
+        overwrite: bool,
+    ) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = (
+            Command::AddGradient {
+                name,
+                gradient,
+                overwrite,
+                tx,
+            },
+            rx,
+        );
+
+        self.0.send(tx).await?;
+        rx.await??;
+        Ok(())
+    }
+
+    pub async fn delete_gradient(&self, name: String) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = (Command::DeleteGradient { name, tx }, rx);
+
+        self.0.send(tx).await?;
+        rx.await??;
+        Ok(())
+    }
+
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         let (tx, rx) = (Command::Shutdown { tx }, rx);
@@ -111,6 +206,9 @@ pub struct Daemon {
     input_handle: cpal::Device,
     output_handle: cpal::Device,
     play_audio: bool,
+
+    // LEDs
+    gradients: led::Gradients,
 }
 
 impl Daemon {
@@ -129,6 +227,7 @@ impl Daemon {
             input_handle,
             output_handle,
             play_audio: false,
+            gradients: led::Gradients::new(),
         })
     }
 
@@ -218,6 +317,26 @@ impl Daemon {
 
                             let _ = tx.send(resp);
                         }
+                        ListGradients { tx } => {
+                            let _ = tx.send(Ok(self.gradients.info()));
+                        }
+                        SetCurrentGradient { name, tx } => {
+                            let _ = tx.send(self.gradients.set_current(&name));
+                        }
+                        GetGradient { name, tx } => {
+                            let _ = tx.send(self.gradients.get(&name));
+                        }
+                        AddGradient {
+                            name,
+                            gradient,
+                            overwrite,
+                            tx,
+                        } => {
+                            let _ = tx.send(self.gradients.add(&name, gradient, overwrite));
+                        }
+                        DeleteGradient { name, tx } => {
+                            let _ = tx.send(self.gradients.delete(&name));
+                        }
                         Shutdown { tx } => {
                             self.cmd_rx.close();
                             let _ = tx.send(Ok(()));
@@ -269,6 +388,179 @@ impl Daemon {
 
             Err(e)
         })
+    }
+}
+
+pub mod led {
+    use std::collections::HashMap;
+
+    use anyhow::anyhow;
+    use palette::{oklch::Oklch, Mix};
+
+    #[derive(Debug, Clone)]
+    pub struct Gradient {
+        // Colours are sorted by position, which
+        // is clamped between 0.0 and 1.0
+        pub colours: Vec<(Oklch, f32)>,
+    }
+
+    impl Gradient {
+        pub fn new() -> Self {
+            Self { colours: vec![] }
+        }
+
+        pub fn add_colour(&mut self, colour: Oklch) {
+            self.colours.push((colour, 1.0))
+        }
+
+        pub fn delete_colour(&mut self, index: usize) -> anyhow::Result<()> {
+            if index >= self.colours.len() {
+                Err(anyhow!("index out of range"))
+            } else {
+                self.colours.remove(index);
+                Ok(())
+            }
+        }
+
+        pub fn edit_colour_position(&mut self, index: usize, position: f32) -> anyhow::Result<()> {
+            if index >= self.colours.len() {
+                Err(anyhow!("index out of range"))
+            } else if position < 0.0 || position > 1.0 {
+                Err(anyhow!("position out of range"))
+            } else {
+                self.colours[index].1 = position;
+                self.colours.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                Ok(())
+            }
+        }
+
+        pub fn edit_colour_value(&mut self, index: usize, value: Oklch) -> anyhow::Result<()> {
+            if index >= self.colours.len() {
+                Err(anyhow!("index out of range"))
+            } else {
+                self.colours[index].0 = value;
+                Ok(())
+            }
+        }
+
+        pub fn interpolate(&self, position: f32) -> Oklch {
+            if self.colours.len() == 0 {
+                return Oklch::new(0.0, 0.0, 0.0);
+            } else if self.colours.len() == 1 {
+                return self.colours[0].0;
+            }
+
+            for i in 0..self.colours.len() - 1 {
+                let left = self.colours[i];
+                let right = self.colours[i + 1];
+                if left.1 <= position && position <= right.1 {
+                    let factor = (position - left.1) / (right.1 - left.1);
+                    return left.0.mix(right.0, factor);
+                }
+            }
+
+            // If we haven't reached the position yet, our colour
+            // is either before the first point or after the last
+            // one
+            if position < self.colours[0].1 {
+                self.colours[0].0
+            } else {
+                self.colours[self.colours.len() - 1].0
+            }
+        }
+
+        pub fn bar(&self, points: usize) -> Vec<Oklch> {
+            let mut colours = Vec::<Oklch>::new();
+
+            let interval = 1.0 / points as f32;
+            let mut position = 0.0;
+            while position < 1.0 {
+                colours.push(self.interpolate(position));
+                position += interval;
+            }
+            colours.push(self.interpolate(1.0));
+
+            colours
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct GradientInfo {
+        pub name: String,
+        pub selected: bool,
+        pub data: Gradient,
+    }
+
+    pub struct Gradients {
+        current: Option<String>,
+        gradients: HashMap<String, Gradient>,
+    }
+
+    impl Gradients {
+        pub fn new() -> Self {
+            Self {
+                current: None,
+                gradients: HashMap::new(),
+            }
+        }
+
+        pub fn info(&self) -> Vec<GradientInfo> {
+            let mut info: Vec<GradientInfo> = vec![];
+
+            for (name, gradient) in self.gradients.iter() {
+                let name = name.clone();
+                info.push(GradientInfo {
+                    selected: self.current.as_ref().is_some_and(|n| *n == name),
+                    data: gradient.clone(),
+                    name,
+                })
+            }
+
+            info.sort_by(|a, b| a.name.cmp(&b.name));
+            info
+        }
+
+        pub fn set_current(&mut self, name: &str) -> anyhow::Result<()> {
+            if !self.gradients.contains_key(name) {
+                return Err(anyhow!("gradient does not exist"));
+            }
+            self.current = Some(name.to_string());
+
+            Ok(())
+        }
+
+        pub fn get(&self, name: &str) -> anyhow::Result<Gradient> {
+            if let Some(gradient) = self.gradients.get(name) {
+                Ok(gradient.clone())
+            } else {
+                Err(anyhow!("gradient does not exist"))
+            }
+        }
+
+        pub fn add(
+            &mut self,
+            name: &str,
+            gradient: Gradient,
+            overwrite: bool,
+        ) -> anyhow::Result<()> {
+            if !overwrite && self.gradients.contains_key(name) {
+                return Err(anyhow!("gradient already exists"));
+            }
+
+            self.gradients.insert(name.to_string(), gradient);
+            self.current = Some(name.to_string());
+
+            Ok(())
+        }
+
+        pub fn delete(&mut self, name: &str) -> anyhow::Result<()> {
+            self.gradients.remove(name);
+            if self.current.as_ref().is_some_and(|n| n == name) {
+                self.current = None;
+            }
+
+            Ok(())
+        }
     }
 }
 

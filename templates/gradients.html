@@ -1,0 +1,42 @@
+{% for g in gradients %}
+  <option value="{{ g.name }}" {% if g.selected %}selected{% endif %}>{{ g.name }}</option>
+{% endfor %}
+
+{% let err_msg = err_message.unwrap_or("") %}
+<div id="gradient-select-load-err" hx-swap-oob="innerHTML">{{ err_msg }}</div>
+
+{% if selected_gradient.is_some() %}
+{% let g = selected_gradient.as_ref().unwrap().clone() %}
+<div id="gradient-editor" hx-swap-oob="innerHTML">
+  <div style="display: grid; grid-template-columns: 15% 78% 1fr; row-gap: 10px;">
+    {% if g.data.colours.len() > 0 %}
+    <div style="grid-row: 1; grid-column: 2;
+                background-image: linear-gradient(
+                  to right,
+                  {% for colour in g.data.bar(25) %}
+                  {{ self::format_colour(colour) }}{% if !loop.last %},{% endif %}
+                  {% endfor %}
+                );" 
+         class="gradient"></div>
+    {% endif %}
+    {% for colour in g.data.colours %}
+    {% let i = loop.index + 1 %}
+    <input style="grid-row: {{ i }}; grid-column: 1; margin: auto;" type="color" value="{{ self::format_colour(colour.0) }}"
+           hx-patch="/api/v1/led/gradients/{{ g.name }}/colours/{{ loop.index0 }}/value" hx-trigger="change"
+           hx-vals="js:{value: event.target.value}">
+    <input style="grid-row: {{ i }}; grid-column: 2;" type="range" min=0, max=1 step=0.005 value="{{ colour.1 }}"
+           hx-patch="/api/v1/led/gradients/{{ g.name }}/colours/{{ loop.index0 }}/position" hx-trigger="change"
+           hx-vals="js:{position: event.target.value}">
+    <button style="grid-row: {{ i }}; grid-column: 3; width: fit-content; height: fit-content; margin: auto 0 auto auto"
+            hx-delete="/api/v1/led/gradients/{{ g.name }}/colours/{{ loop.index0 }}">x</button>
+    {% endfor %}
+    <button style="grid-row: {{ g.data.colours.len() + 2 }}; grid-column: 2/4; width: fit-content; margin-left: auto;" 
+            hx-post="/api/v1/led/gradients/{{ g.name }}/colours" hx-trigger="click" hx-swap="none">Add Colour</button>
+  </div>
+</div>
+{% else if err_message.is_none() %}
+<div id="gradient-editor" hx-swap-oob="innerHTML">
+  <i>No gradients exist, click the "Add Gradient" button to begin!</i>
+</div>
+{% endif %}
+

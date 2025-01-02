@@ -104,7 +104,26 @@
     		border: 1px solid black;
     		padding: 2px 5px;
     	}
+
+      input[type=range] {
+        width: 100%
+      }
+
+      .gradient {
+        margin-left: auto;
+        width: 100%;
+        height: 50px;
+      }
     </style>
+    <script>
+      window.addEventListener("DOMContentLoaded", (event) => {
+          const el = document.getElementById('gradient-select');
+          el.addEventListener('htmx:configRequest', function(evt) {
+            if (evt.detail.triggeringEvent.type !== "change")          
+              evt.detail.parameters.delete("gradient")
+          });
+      });
+    </script>
   </head>
   <body>
     <div class="grid">
@@ -112,6 +131,7 @@
         <hgroup>
           <h2>Sparrow</h2>
         </hgroup>
+        <!-- Audio -->
         <hgroup>
           <h3>Audio</h3>
         </hgroup>
@@ -132,11 +152,31 @@
           <button id="audio-status-button" hx-get="/api/v1/audio/status/toggle" hx-trigger="click" hx-swap="none">
             Toggle
           </button>
+          <!-- TODO This box should be hidden when empty -->
           <div class="error-box">
             <div class="error" id="audio-status-err"></div>
             <div class="error" id="audio-status-toggle-err"></div>
           </div>
         </p>
+        <!-- Colours -->
+        <hgroup>
+          <h3>Colours</h3>
+        </hgroup>
+        <p hx-sync="this">
+          <label for="gradient-select">Gradient:</label>
+          <select id="gradient-select" name="gradient" hx-get="/api/v1/led/gradients" 
+                  hx-trigger="load,change,gradientAdded from:body,gradientDeleted from:body, gradientEdited from:body">
+          </select>
+          <button style="float: right" hx-delete="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Delete Gradient</button>
+          <button style="float: right" hx-post="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Add Gradient</button>
+          <div id="gradient-editor" style="margin-left: 10px"></div>
+          <!-- TODO This box should be hidden when empty -->
+          <div class="error-box">
+            <div class="error" id="gradient-select-load-err"></div>
+            <div class="error" id="gradient-select-change-err"></div>
+          </div>
+        </p>
+        <!-- Logs -->
         <hgroup>
           <h3>Logs</h3>
         </hgroup>
