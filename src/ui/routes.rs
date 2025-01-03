@@ -8,118 +8,20 @@ use std::{
 
 use crate::engine::{self, audio, led};
 
+use anyhow::anyhow;
 use askama::Template;
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, Request, State},
-    middleware::{self, Next},
+    extract::{Path, Query, State},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, patch, post},
     Form, Router,
 };
-use http::{header, status::StatusCode, HeaderMap, HeaderValue};
-use palette::{FromColor, Oklch, Srgb};
+use futures::TryFutureExt;
+use http::{header, HeaderMap, HeaderValue, StatusCode};
 use serde::{de, Deserialize, Deserializer};
-use slog_scope::{error, info};
-use tokio::{signal, sync::mpsc};
-
-pub struct Server {
-    app: Router,
-    engine_tx: engine::Tx,
-}
-
-impl Server {
-    pub fn new(engine_tx: engine::Tx, engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Self {
-        Self {
-            app: Router::new()
-                .route("/", get(home))
-                .nest("/assets", asset_routes())
-                .nest("/api/v1", api_routes(engine_errors_rx))
-                .with_state(engine_tx.clone())
-                .layer(middleware::from_fn(log_requests)),
-            engine_tx,
-        }
-    }
-
-    pub async fn run(self) -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:4181").await?;
-        info!("Listening on {:?}...", listener.local_addr().unwrap());
-        axum::serve(listener, self.app)
-            .with_graceful_shutdown(shutdown_signal(self.engine_tx.clone()))
-            .await?;
-
-        Ok(())
-    }
-}
-
-// -- Middleware / Helpers
-
-async fn shutdown_signal(engine_tx: engine::Tx) {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
-
-    if let Err(e) = engine_tx.shutdown().await {
-        error!("Failed to shutdown daemon"; "error" => format!("{e}"))
-    } else {
-        info!("Daemon shutdown")
-    }
-}
-
-async fn log_requests(request: Request, next: Next) -> impl IntoResponse {
-    let uri = request.uri().to_string();
-    let method = request.method().to_string();
-
-    let start = Instant::now();
-    let resp = next.run(request).await;
-    let elapsed = start.elapsed();
-    let status = resp.status().to_string();
-
-    info!("Request"; "status" => status, "method" => method, "uri" => uri, "elapsed" => format!("{elapsed:?}"));
-
-    resp
-}
-
-/// Serde deserialization decorator to map empty Strings to None,
-/// we use this in some cases to parse query parameters from htmx
-/// requests
-fn empty_string_as_none<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: FromStr,
-    T::Err: fmt::Display,
-{
-    let opt = Option::<String>::deserialize(de)?;
-    match opt.as_deref() {
-        None | Some("") => Ok(None),
-        Some(s) => FromStr::from_str(s).map_err(de::Error::custom).map(Some),
-    }
-}
-
-pub fn format_colour(colour: &Oklch) -> String {
-    let srgb: Srgb<u8> = Srgb::from_color(colour.clone()).into_format();
-    let hex = format!("#{:02x}{:02x}{:02x}", srgb.red, srgb.green, srgb.blue);
-    hex
-}
-
-// -- Templates
+use slog_scope::error;
+use tokio::sync::mpsc;
 
 struct HtmlTemplate<T>(T);
 
@@ -141,9 +43,7 @@ where
     }
 }
 
-// -- Routes
-
-async fn home() -> impl IntoResponse {
+pub async fn home() -> impl IntoResponse {
     #[derive(Template)]
     #[template(path = "home.html")]
     struct HomeTemplate;
@@ -151,10 +51,10 @@ async fn home() -> impl IntoResponse {
     HtmlTemplate(HomeTemplate {})
 }
 
-fn asset_routes() -> Router<engine::Tx> {
+pub fn assets() -> Router<engine::Tx> {
     // TODO Create a favicon.ico route
 
-    const HTMX_JS_FILE: &[u8] = include_bytes!("../assets/htmx.min.js");
+    const HTMX_JS_FILE: &[u8] = include_bytes!("../../assets/htmx.min.js");
 
     async fn get_htmx() -> impl IntoResponse {
         match Response::builder()
@@ -170,7 +70,7 @@ fn asset_routes() -> Router<engine::Tx> {
         }
     }
 
-    const SSE_JS_FILE: &[u8] = include_bytes!("../assets/sse.js");
+    const SSE_JS_FILE: &[u8] = include_bytes!("../../assets/sse.js");
 
     async fn get_sse() -> impl IntoResponse {
         match Response::builder()
@@ -191,11 +91,24 @@ fn asset_routes() -> Router<engine::Tx> {
         .route("/sse.js", get(get_sse))
 }
 
-fn api_routes(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine::Tx> {
-    /// When we GET the list of input/output devices,
-    /// we use this query parameter to request to
-    /// change the currently used device by supplying
-    /// a device name
+/// Serde deserialization decorator to map empty Strings to None,
+/// we use this in some cases to parse query parameters from htmx
+/// requests. It ends up being simpler than fiddling around with
+/// Javascript to not send query parameters for certain requests
+fn empty_string_as_none<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    let opt = Option::<String>::deserialize(de)?;
+    match opt.as_deref() {
+        None | Some("") => Ok(None),
+        Some(s) => FromStr::from_str(s).map_err(de::Error::custom).map(Some),
+    }
+}
+
+pub fn api(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine::Tx> {
     #[derive(Deserialize)]
     struct ChangeDeviceRequest {
         #[serde(default, deserialize_with = "empty_string_as_none")]
@@ -383,9 +296,6 @@ fn api_routes(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<eng
         HtmlTemplate(LogsTemplate { logs }).into_response()
     };
 
-    /// When we GET the list of gradients, we use this
-    /// query parameter to request to change the current
-    /// gradient by supplying its name
     #[derive(Deserialize)]
     struct ChangeGradientRequest {
         #[serde(default, deserialize_with = "empty_string_as_none")]
@@ -454,157 +364,130 @@ fn api_routes(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<eng
     }
 
     #[derive(Template)]
-    #[template(path = "gradients-change.html")]
-    struct GradientsChangeTemplate<'a> {
+    #[template(path = "gradients-edited.html")]
+    struct GradientsEditedTemplate<'a> {
         err_message: Option<&'a str>,
+    }
+
+    // Most of the gradient functions either succeed and result
+    // in a refresh, or fail with some error. We write a helper
+    // function to encapsulate this shared functionality
+    fn gradients_edited_resp(result: anyhow::Result<()>, err_message: &str) -> Response<Body> {
+        match result {
+            Ok(_) => {
+                let template = GradientsEditedTemplate { err_message: None };
+                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
+                resp.headers_mut().insert(
+                    "HX-Trigger-After-Settle",
+                    HeaderValue::from_static("gradientsEdited"),
+                );
+                resp
+            }
+            Err(e) => {
+                error!("Failed gradient editing operation"; "error" => format!("{e}"));
+                HtmlTemplate(GradientsEditedTemplate {
+                    err_message: Some(err_message),
+                })
+                .into_response()
+            }
+        }
+    }
+
+    // Some gradient functions all parse input in the same
+    // way, so we define a helper for this as well
+    fn parse_hx_prompt(headers: HeaderMap) -> Option<String> {
+        match headers
+            .get("HX-Prompt")
+            .map(|h| h.to_str().unwrap_or_default())
+        {
+            Some("") | None => None,
+            Some(n) => Some(n.to_string()),
+        }
+    }
+
+    // And we also need to parse valid input data for
+    // the gradients in some cases
+    async fn parse_colour_index(
+        engine_tx: &engine::Tx,
+        gradient: String,
+        index: usize,
+    ) -> anyhow::Result<led::Gradient> {
+        engine_tx
+            .get_gradient(gradient)
+            .and_then(|gradient| async {
+                let len = gradient.colours.len();
+                if index >= len || len == 0 {
+                    Err(anyhow!("invalid colour index"))
+                } else {
+                    Ok(gradient)
+                }
+            })
+            .await
     }
 
     async fn add_led_gradient(
         State(engine_tx): State<engine::Tx>,
         headers: HeaderMap,
     ) -> impl IntoResponse {
-        let name = match headers
-            .get("HX-Prompt")
-            .map(|h| h.to_str().unwrap_or_default())
-        {
-            Some("") | None => {
-                return HtmlTemplate(GradientsChangeTemplate {
+        let name = match parse_hx_prompt(headers) {
+            None => {
+                return HtmlTemplate(GradientsEditedTemplate {
                     err_message: Some("Gradient must have a name."),
                 })
                 .into_response();
             }
-            Some(n) => n.to_string(),
+            Some(name) => name,
         };
 
-        let resp = match engine_tx
+        let operation = engine_tx
             .add_gradient(name, led::Gradient::new(), false)
-            .await
-        {
-            Ok(_) => {
-                let template = GradientsChangeTemplate { err_message: None };
-                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
-                resp.headers_mut().insert(
-                    "HX-Trigger-After-Settle",
-                    HeaderValue::from_static("gradientAdded"),
-                );
-                resp
-            }
-            Err(e) => {
-                error!("Failed to add gradient"; "error" => format!("{e}"));
-                HtmlTemplate(GradientsChangeTemplate {
-                    err_message: Some("Failed to add gradient."),
-                })
-                .into_response()
-            }
-        };
-        resp
+            .await;
+        gradients_edited_resp(operation, "Failed to add gradient.")
     }
 
     async fn delete_led_gradient(
         State(engine_tx): State<engine::Tx>,
         headers: HeaderMap,
     ) -> impl IntoResponse {
-        let name = match headers
-            .get("HX-Prompt")
-            .map(|h| h.to_str().unwrap_or_default())
-        {
-            Some("") | None => {
-                return HtmlTemplate(GradientsChangeTemplate {
+        let name = match parse_hx_prompt(headers) {
+            None => {
+                return HtmlTemplate(GradientsEditedTemplate {
                     err_message: Some("Gradient must have a name."),
                 })
                 .into_response();
             }
-            Some(n) => n.to_string(),
+            Some(name) => name,
         };
 
-        let resp = match engine_tx.delete_gradient(name).await {
-            Ok(_) => {
-                let template = GradientsChangeTemplate { err_message: None };
-                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
-                resp.headers_mut().insert(
-                    "HX-Trigger-After-Settle",
-                    HeaderValue::from_static("gradientDeleted"),
-                );
-                resp
-            }
-            Err(e) => {
-                error!("Failed to delete gradient"; "error" => format!("{e}"));
-                HtmlTemplate(GradientsChangeTemplate {
-                    err_message: Some("Failed to delete gradient."),
-                })
-                .into_response()
-            }
-        };
-        resp
+        let operation = engine_tx.delete_gradient(name).await;
+        gradients_edited_resp(operation, "Failed to delete gradient.")
     }
 
     async fn add_colour(
         State(engine_tx): State<engine::Tx>,
         Path(name): Path<String>,
     ) -> impl IntoResponse {
-        let operation = match engine_tx.get_gradient(name.clone()).await {
-            Ok(mut gradient) => {
-                gradient.add_colour(Oklch::new(0.0, 0.0, 0.0));
+        let operation = engine_tx
+            .get_gradient(name.clone())
+            .and_then(|mut gradient| async {
+                gradient.add_colour(led::BLACK);
                 engine_tx.add_gradient(name, gradient, true).await
-            }
-            Err(e) => Err(e),
-        };
-
-        let resp = match operation {
-            Ok(_) => {
-                let template = GradientsChangeTemplate { err_message: None };
-                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
-                resp.headers_mut().insert(
-                    "HX-Trigger-After-Settle",
-                    HeaderValue::from_static("gradientEdited"),
-                );
-                resp
-            }
-            Err(e) => {
-                error!("Failed to add colour"; "error" => format!("{e}"));
-                HtmlTemplate(GradientsChangeTemplate {
-                    err_message: Some("Failed to add colour."),
-                })
-                .into_response()
-            }
-        };
-        resp
+            })
+            .await;
+        gradients_edited_resp(operation, "Failed to add colour.")
     }
 
     async fn delete_colour(
         State(engine_tx): State<engine::Tx>,
         Path((name, index)): Path<(String, usize)>,
     ) -> impl IntoResponse {
-        let operation = match engine_tx
-            .get_gradient(name.clone())
-            .await
-            .and_then(|mut g| {
-                g.delete_colour(index)?;
-                Ok(g)
-            }) {
-            Ok(gradient) => engine_tx.add_gradient(name, gradient, true).await,
-            Err(e) => Err(e),
-        };
-
-        let resp = match operation {
-            Ok(_) => {
-                let template = GradientsChangeTemplate { err_message: None };
-                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
-                resp.headers_mut().insert(
-                    "HX-Trigger-After-Settle",
-                    HeaderValue::from_static("gradientEdited"),
-                );
-                resp
-            }
-            Err(e) => {
-                error!("Failed to delete colour"; "error" => format!("{e}"));
-                HtmlTemplate(GradientsChangeTemplate {
-                    err_message: Some("Failed to delete colour."),
-                })
-                .into_response()
-            }
-        };
-        resp
+        let operation = parse_colour_index(&engine_tx, name.clone(), index)
+            .and_then(|mut gradient| async {
+                gradient.delete_colour(index);
+                engine_tx.add_gradient(name, gradient, true).await
+            })
+            .await;
+        gradients_edited_resp(operation, "Failed to delete colour.")
     }
 
     #[derive(Deserialize)]
@@ -617,38 +500,17 @@ fn api_routes(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<eng
         Path((name, index)): Path<(String, usize)>,
         Form(cv): Form<ColourValue>,
     ) -> impl IntoResponse {
-        let operation = match engine_tx
-            .get_gradient(name.clone())
-            .await
-            .and_then(|mut g| {
-                let srgb: Srgb<f32> = Srgb::from_str(&cv.value)?.into_format();
-                let hcl = Oklch::from_color(srgb);
-                g.edit_colour_value(index, hcl)?;
-                Ok(g)
-            }) {
-            Ok(gradient) => engine_tx.add_gradient(name, gradient, true).await,
-            Err(e) => Err(e),
-        };
-
-        let resp = match operation {
-            Ok(_) => {
-                let template = GradientsChangeTemplate { err_message: None };
-                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
-                resp.headers_mut().insert(
-                    "HX-Trigger-After-Settle",
-                    HeaderValue::from_static("gradientEdited"),
-                );
-                resp
-            }
-            Err(e) => {
-                error!("Failed to edit colour value"; "error" => format!("{e}"));
-                HtmlTemplate(GradientsChangeTemplate {
-                    err_message: Some("Failed to edit colour value."),
-                })
-                .into_response()
-            }
-        };
-        resp
+        let tx = &engine_tx;
+        let operation = parse_colour_index(tx, name.clone(), index)
+            .and_then(|gradient| async {
+                led::Colour::from_str(&cv.value).map(|colour| (gradient, colour))
+            })
+            .and_then(|(mut gradient, colour)| async move {
+                gradient.change_colour(index, colour);
+                tx.add_gradient(name, gradient, true).await
+            })
+            .await;
+        gradients_edited_resp(operation, "Failed to edit colour.")
     }
 
     #[derive(Deserialize)]
@@ -661,36 +523,17 @@ fn api_routes(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<eng
         Path((name, index)): Path<(String, usize)>,
         Form(cp): Form<ColourPosition>,
     ) -> impl IntoResponse {
-        let operation = match engine_tx
-            .get_gradient(name.clone())
-            .await
-            .and_then(|mut g| {
-                g.edit_colour_position(index, cp.position)?;
-                Ok(g)
-            }) {
-            Ok(gradient) => engine_tx.add_gradient(name, gradient, true).await,
-            Err(e) => Err(e),
-        };
-
-        let resp = match operation {
-            Ok(_) => {
-                let template = GradientsChangeTemplate { err_message: None };
-                let mut resp: Response<Body> = HtmlTemplate(template).into_response();
-                resp.headers_mut().insert(
-                    "HX-Trigger-After-Settle",
-                    HeaderValue::from_static("gradientEdited"),
-                );
-                resp
-            }
-            Err(e) => {
-                error!("Failed to edit colour position"; "error" => format!("{e}"));
-                HtmlTemplate(GradientsChangeTemplate {
-                    err_message: Some("Failed to edit colour position."),
-                })
-                .into_response()
-            }
-        };
-        resp
+        let operation = parse_colour_index(&engine_tx, name.clone(), index)
+            .and_then(|mut gradient| async {
+                if cp.position < 0.0 || cp.position > 1.0 {
+                    Err(anyhow!("invalid colour position"))
+                } else {
+                    gradient.change_position(index, cp.position);
+                    engine_tx.add_gradient(name, gradient, true).await
+                }
+            })
+            .await;
+        gradients_edited_resp(operation, "Failed to edit colour position.")
     }
 
     Router::new()

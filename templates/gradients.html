@@ -14,14 +14,14 @@
                 background-image: linear-gradient(
                   to right,
                   {% for colour in g.data.bar(25) %}
-                  {{ self::format_colour(colour) }}{% if !loop.last %},{% endif %}
+                  {{ colour.to_string() }}{% if !loop.last %},{% endif %}
                   {% endfor %}
                 );" 
          class="gradient"></div>
     {% endif %}
     {% for colour in g.data.colours %}
     {% let i = loop.index + 1 %}
-    <input style="grid-row: {{ i }}; grid-column: 1; margin: auto;" type="color" value="{{ self::format_colour(colour.0) }}"
+    <input style="grid-row: {{ i }}; grid-column: 1; margin: auto;" type="color" value="{{ colour.0.to_string() }}"
            hx-patch="/api/v1/led/gradients/{{ g.name }}/colours/{{ loop.index0 }}/value" hx-trigger="change"
            hx-vals="js:{value: event.target.value}">
     <input style="grid-row: {{ i }}; grid-column: 2;" type="range" min=0, max=1 step=0.005 value="{{ colour.1 }}"

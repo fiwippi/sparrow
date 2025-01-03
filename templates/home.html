@@ -164,8 +164,7 @@
         </hgroup>
         <p hx-sync="this">
           <label for="gradient-select">Gradient:</label>
-          <select id="gradient-select" name="gradient" hx-get="/api/v1/led/gradients" 
-                  hx-trigger="load,change,gradientAdded from:body,gradientDeleted from:body, gradientEdited from:body">
+          <select id="gradient-select" name="gradient" hx-get="/api/v1/led/gradients" hx-trigger="load,change, gradientsEdited from:body">
           </select>
           <button style="float: right" hx-delete="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Delete Gradient</button>
           <button style="float: right" hx-post="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Add Gradient</button>
