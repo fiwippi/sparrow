@@ -70,25 +70,7 @@ pub fn assets() -> Router<engine::Tx> {
         }
     }
 
-    const SSE_JS_FILE: &[u8] = include_bytes!("../../assets/sse.js");
-
-    async fn get_sse() -> impl IntoResponse {
-        match Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(Bytes::from_static(SSE_JS_FILE)))
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                error!("Failed to serve sse asset"; "error" => format!("{e}"));
-                (StatusCode::INTERNAL_SERVER_ERROR, "").into_response()
-            }
-        }
-    }
-
-    Router::new()
-        .route("/htmx.min.js", get(get_htmx))
-        .route("/sse.js", get(get_sse))
+    Router::new().route("/htmx.min.js", get(get_htmx))
 }
 
 /// Serde deserialization decorator to map empty Strings to None,
