@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::engine::{self, audio, led};
+use crate::engine::{self, audio, dmx, led};
 
 use anyhow::anyhow;
 use askama::Template;
@@ -247,36 +247,61 @@ pub fn api(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine
         resp
     }
 
-    let event_log = Arc::new(Mutex::new(Vec::new()));
-    let closure_event_log = Arc::clone(&event_log);
-    tokio::spawn(async move {
-        let log_retention = Duration::from_secs(5 * 60); // TODO Make configurable
-        while let Some(error) = engine_errors_rx.recv().await {
-            {
-                let now = Instant::now();
-                let mut log = closure_event_log.lock().unwrap();
-                log.push((format!("{error:?}"), now));
-                log.retain(|&(_, timestamp)| now.duration_since(timestamp) <= log_retention);
-            }
-            // Ensure the mutex is dropped post-event...
-        }
-    });
-
     #[derive(Template)]
-    #[template(path = "logs.html")]
-    struct LogsTemplate<'a> {
-        logs: Vec<(&'a str, Instant)>,
+    #[template(path = "dmx-outputs.html")]
+    struct DMXOutputsTemplate<'a> {
+        devices: Vec<dmx::DeviceInfo>,
+        err_message: Option<&'a str>,
     }
 
-    let closure_event_log = Arc::clone(&event_log);
-    let log_retention = Duration::from_secs(5 * 60); // TODO Make configurable
-    let get_logs = move |State(_): State<engine::Tx>| async move {
-        let now = Instant::now();
-        let mut log = closure_event_log.lock().unwrap();
-        log.retain(|&(_, timestamp)| now.duration_since(timestamp) <= log_retention);
-        let logs = log.iter().map(|(s, t)| (s.as_ref(), *t)).collect();
-        HtmlTemplate(LogsTemplate { logs }).into_response()
-    };
+    async fn get_dmx_outputs(
+        State(engine_tx): State<engine::Tx>,
+        change_request: Query<ChangeDeviceRequest>,
+    ) -> impl IntoResponse {
+        let set_output_res = if let Some(device) = change_request.0.device {
+            if device == "unselected" {
+                // This is a reserved device name which lets us
+                // know we should not be connected to any DMX
+                // device
+                engine_tx.set_dmx_output(None).await
+            } else {
+                engine_tx.set_dmx_output(Some(device)).await
+            }
+        } else {
+            Ok(())
+        };
+        let list_outputs_res = engine_tx.list_dmx_outputs().await;
+
+        let template = match (set_output_res, list_outputs_res) {
+            (Ok(_), Ok(devices)) => DMXOutputsTemplate {
+                devices,
+                err_message: None,
+            },
+            (Err(e), Ok(devices)) => {
+                error!("Failed to switch DMX output"; "error" => format!("{e}"));
+                DMXOutputsTemplate {
+                    devices,
+                    err_message: Some("Failed to switch device."),
+                }
+            }
+            (Ok(_), Err(e)) => {
+                error!("Failed to list DMX outputs"; "error" => format!("{e}"));
+                DMXOutputsTemplate {
+                    devices: vec![],
+                    err_message: Some("Switched device, but failed to reload the available devices. Please refresh the page."),
+                }
+            }
+            (Err(left), Err(right)) => {
+                error!("Failed to switch DMX output"; "error" => format!("{left}"));
+                error!("Failed to list DMX outputs"; "error" => format!("{right}"));
+                DMXOutputsTemplate {
+                    devices: vec![],
+                    err_message: Some("Failed to switch device and reload the available devices. Please refresh the page."),
+                }
+            }
+        };
+        HtmlTemplate(template).into_response()
+    }
 
     #[derive(Deserialize)]
     struct ChangeGradientRequest {
@@ -518,11 +543,43 @@ pub fn api(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine
         gradients_edited_resp(operation, "Failed to edit colour position.")
     }
 
+    let event_log = Arc::new(Mutex::new(Vec::new()));
+    let closure_event_log = Arc::clone(&event_log);
+    tokio::spawn(async move {
+        let log_retention = Duration::from_secs(5 * 60); // TODO Make configurable
+        while let Some(error) = engine_errors_rx.recv().await {
+            {
+                let now = Instant::now();
+                let mut log = closure_event_log.lock().unwrap();
+                log.push((format!("{error:?}"), now));
+                log.retain(|&(_, timestamp)| now.duration_since(timestamp) <= log_retention);
+            }
+            // Ensure the mutex is dropped post-event...
+        }
+    });
+
+    #[derive(Template)]
+    #[template(path = "logs.html")]
+    struct LogsTemplate<'a> {
+        logs: Vec<(&'a str, Instant)>,
+    }
+
+    let closure_event_log = Arc::clone(&event_log);
+    let log_retention = Duration::from_secs(5 * 60); // TODO Make configurable
+    let get_logs = move |State(_): State<engine::Tx>| async move {
+        let now = Instant::now();
+        let mut log = closure_event_log.lock().unwrap();
+        log.retain(|&(_, timestamp)| now.duration_since(timestamp) <= log_retention);
+        let logs = log.iter().map(|(s, t)| (s.as_ref(), *t)).collect();
+        HtmlTemplate(LogsTemplate { logs }).into_response()
+    };
+
     Router::new()
         .route("/audio/devices/input", get(get_audio_inputs))
         .route("/audio/devices/output", get(get_audio_outputs))
         .route("/audio/status", get(get_audio_status))
         .route("/audio/status/toggle", get(toggle_audio_status))
+        .route("/led/dmx", get(get_dmx_outputs))
         .route("/led/gradients", get(get_led_gradients))
         .route("/led/gradients", post(add_led_gradient))
         .route("/led/gradients", delete(delete_led_gradient))

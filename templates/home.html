@@ -78,7 +78,7 @@
         font-weight: bold;
         padding-left: 10px;
         margin-left: 10px;
-        border-left: 10px solid #ff6d6d;
+        border-left: 10px solid #e70000;
       }
 
       .error-box {
@@ -162,6 +162,12 @@
         <hgroup>
           <h3>Colours</h3>
         </hgroup>
+        <p id="dmx">
+          <label for="dmx-select">DMX device:</label>
+          <select id="dmx-select" name="device" hx-get="/api/v1/led/dmx" hx-trigger="load,change">
+          </select>
+          <div class="error" id="dmx-err"></div>
+        </p>
         <p hx-sync="this">
           <label for="gradient-select">Gradient:</label>
           <select id="gradient-select" name="gradient" hx-get="/api/v1/led/gradients" hx-trigger="load,change, gradientsEdited from:body">

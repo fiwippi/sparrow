@@ -1,5 +1,7 @@
 use std::{fmt, sync::Mutex};
 
+use super::{dmx, led};
+
 use cpal::{
     self,
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -95,8 +97,10 @@ impl Pipe {
     pub fn new(
         input_handle: &cpal::Device,
         output_handle: &cpal::Device,
-        errors: mpsc::Sender<anyhow::Error>,
         latency_ms: f32,
+        dmx_agent: Option<dmx::SerialAgent>,
+        gradient: led::Gradient,
+        errors: mpsc::Sender<anyhow::Error>,
     ) -> anyhow::Result<Self> {
         // We use the same configurations between the input
         // and output stream to simplify the logic
@@ -158,7 +162,21 @@ impl Pipe {
                     index as f32
                 };
                 let freq_bin = config.sample_rate.0 as f32 / mono.len() as f32;
-                let freq = index * freq_bin;
+                let mut freq = index * freq_bin;
+
+                // TODO Add FFT dampening
+                // TODO Make MAX_FREQ configurable
+                const MAX_FREQ: f32 = 2000.0;
+                if freq > MAX_FREQ {
+                    freq = MAX_FREQ
+                }
+
+                if let Some(agent) = &dmx_agent {
+                    let colour = gradient.interpolate(freq / MAX_FREQ);
+                    if let Err(e) = agent.blocking_set_colour(colour) {
+                        error!("Failed to set LED colour"; "error" => format!("{:?}", e))
+                    }
+                }
 
                 buf.clear();
             }

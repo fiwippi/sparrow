@@ -1,3 +1,5 @@
+use super::{audio, dmx, led};
+
 use anyhow::anyhow; // TODO Remove anyhow
 use cpal::traits::DeviceTrait;
 use slog_scope::error;
@@ -5,9 +7,6 @@ use tokio::{
     sync::{mpsc, oneshot},
     task,
 };
-
-use super::audio;
-use super::led;
 
 type Ack<T> = oneshot::Sender<anyhow::Result<T>>; // TODO Remove anyhow
 
@@ -54,6 +53,13 @@ pub enum Command {
         name: String, // TODO &str
         tx: Ack<()>,
     },
+    ListDMXOutputs {
+        tx: Ack<Vec<dmx::DeviceInfo>>,
+    },
+    SetDMXOutput {
+        device_name: Option<String>,
+        tx: Ack<()>,
+    },
     Shutdown {
         tx: Ack<()>,
     },
@@ -68,8 +74,8 @@ impl Tx {
         let (tx, rx) = (Command::ListAudioInputs { tx }, rx);
 
         self.0.send(tx).await?;
-        let names = rx.await??;
-        Ok(names)
+        let inputs = rx.await??;
+        Ok(inputs)
     }
 
     pub async fn list_audio_outputs(&self) -> anyhow::Result<Vec<audio::DeviceInfo>> {
@@ -77,8 +83,8 @@ impl Tx {
         let (tx, rx) = (Command::ListAudioOutputs { tx }, rx);
 
         self.0.send(tx).await?;
-        let names = rx.await??;
-        Ok(names)
+        let outputs = rx.await??;
+        Ok(outputs)
     }
 
     pub async fn set_audio_input(&self, device_name: String) -> anyhow::Result<()> {
@@ -175,6 +181,24 @@ impl Tx {
         Ok(())
     }
 
+    pub async fn list_dmx_outputs(&self) -> anyhow::Result<Vec<dmx::DeviceInfo>> {
+        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = (Command::ListDMXOutputs { tx }, rx);
+
+        self.0.send(tx).await?;
+        let outputs = rx.await??;
+        Ok(outputs)
+    }
+
+    pub async fn set_dmx_output(&self, device_name: Option<String>) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = (Command::SetDMXOutput { device_name, tx }, rx);
+
+        self.0.send(tx).await?;
+        rx.await??;
+        Ok(())
+    }
+
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         let (tx, rx) = (Command::Shutdown { tx }, rx);
@@ -192,7 +216,6 @@ pub enum PlaybackStatus {
     Paused,
 }
 
-// TODO Make piping on startup with the default devices configurable
 pub struct Daemon {
     // Command/Error exchange
     cmd_rx: mpsc::Receiver<Command>,
@@ -207,6 +230,7 @@ pub struct Daemon {
 
     // LEDs
     gradients: led::Gradients,
+    dmx_port: Option<String>, // The name of the port, e.g. /dev/tty0
 }
 
 impl Daemon {
@@ -228,6 +252,7 @@ impl Daemon {
                 output_handle,
                 play_audio: false,
                 gradients: led::Gradients::new(),
+                dmx_port: None,
             },
             Tx(cmd_tx),
             err_rx,
@@ -247,6 +272,7 @@ impl Daemon {
                 // instantiate it within the LocalSet, which
                 // supports running !Send futures
                 let mut audio_pipe: Option<audio::Pipe> = None;
+                let mut dmx_agent: Option<dmx::SerialAgent> = None;
 
                 while let Some(cmd) = self.cmd_rx.recv().await {
                     use Command::*;
@@ -273,7 +299,13 @@ impl Daemon {
                                     self.input_handle = d.handle;
                                     Ok(())
                                 })
-                                .and_then(|_| self.play_audio(&mut audio_pipe));
+                                .and_then(|_| {
+                                    if self.play_audio {
+                                        self.play_audio(&mut audio_pipe, &dmx_agent)
+                                    } else {
+                                        Ok(())
+                                    }
+                                });
 
                             let _ = tx.send(resp);
                         }
@@ -290,7 +322,13 @@ impl Daemon {
                                     self.output_handle = d.handle;
                                     Ok(())
                                 })
-                                .and_then(|_| self.play_audio(&mut audio_pipe));
+                                .and_then(|_| {
+                                    if self.play_audio {
+                                        self.play_audio(&mut audio_pipe, &dmx_agent)
+                                    } else {
+                                        Ok(())
+                                    }
+                                });
 
                             let _ = tx.send(resp);
                         }
@@ -305,15 +343,21 @@ impl Daemon {
                         }
                         ToggleAudioStatus { tx } => {
                             let resp = if self.play_audio {
+                                self.play_audio = false;
                                 if let Some(pipe) = audio_pipe.take() {
                                     drop(pipe);
                                 }
-
-                                self.play_audio = false;
+                                // When pausing, we don't actually want to
+                                // destroy the connection to the DMX device
+                                // so we don't stop the agent like we do in
+                                // .cleanup_audio()
+                                if let Some(agent) = &dmx_agent {
+                                    let _ = agent.set_colour(led::BLACK).await;
+                                }
                                 Ok(())
                             } else {
                                 self.play_audio = true;
-                                self.play_audio(&mut audio_pipe)
+                                self.play_audio(&mut audio_pipe, &dmx_agent)
                             };
 
                             let _ = tx.send(resp);
@@ -338,8 +382,33 @@ impl Daemon {
                         DeleteGradient { name, tx } => {
                             let _ = tx.send(self.gradients.delete(&name));
                         }
+                        ListDMXOutputs { tx } => {
+                            let _ = tx.send(dmx::available_ports(self.dmx_port.as_deref()));
+                        }
+                        SetDMXOutput { device_name, tx } => {
+                            self.cleanup_audio(&mut audio_pipe, &mut dmx_agent).await;
+
+                            self.dmx_port = device_name;
+                            if let Some(port) = &self.dmx_port {
+                                match dmx::SerialAgent::open(port) {
+                                    Ok(agent) => dmx_agent = Some(agent),
+                                    Err(e) => {
+                                        let _ = tx.send(Err(e));
+                                        continue;
+                                    }
+                                }
+                            };
+                            let resp = if self.play_audio {
+                                self.play_audio(&mut audio_pipe, &dmx_agent)
+                            } else {
+                                Ok(())
+                            };
+
+                            let _ = tx.send(resp);
+                        }
                         Shutdown { tx } => {
                             self.cmd_rx.close();
+                            self.cleanup_audio(&mut audio_pipe, &mut dmx_agent).await;
                             let _ = tx.send(Ok(()));
                             return;
                         }
@@ -351,23 +420,30 @@ impl Daemon {
         Ok(())
     }
 
-    fn play_audio(&mut self, audio_pipe: &mut Option<audio::Pipe>) -> anyhow::Result<()> {
+    fn play_audio(
+        &mut self,
+        audio_pipe: &mut Option<audio::Pipe>,
+        dmx_agent: &Option<dmx::SerialAgent>,
+    ) -> anyhow::Result<()> {
+        let gradient = self
+            .gradients
+            .get_current()
+            .unwrap_or_else(|| led::Gradient::new());
+
         audio::Pipe::new(
             &self.input_handle,
             &self.output_handle,
-            self.err_tx.clone(),
             LATENCY_MS,
+            dmx_agent.clone(),
+            gradient,
+            self.err_tx.clone(),
         )
         .and_then(|p| {
             if let Some(pipe) = audio_pipe.take() {
                 drop(pipe);
-            }
+            };
             *audio_pipe = Some(p);
-            if self.play_audio {
-                audio_pipe.as_ref().unwrap().play()
-            } else {
-                Ok(())
-            }
+            audio_pipe.as_ref().unwrap().play()
         })
         .or_else(|e| {
             error!("Failed to start pipe"; "error" => format!("{:?}", e));
@@ -375,15 +451,26 @@ impl Daemon {
                 drop(pipe);
             }
 
-            // If we failed to play audio, let the user know
-            // that the playback failed. At this point we
-            // forcefully pause the stream and wait for user
-            // input to continue playback
+            // If we failed to play audio, let the user know that the
+            // playback failed. At this point we forcefully pause the
+            // stream and wait for user input to continue playback
             self.play_audio = false;
-            let pipe_err = anyhow!(format!("{e:?}")); // TODO Remove, needed until concrete errors
-            let _ = self.err_tx.send(pipe_err);
 
             Err(e)
         })
+    }
+
+    async fn cleanup_audio(
+        &mut self,
+        audio_pipe: &mut Option<audio::Pipe>,
+        dmx_agent: &mut Option<dmx::SerialAgent>,
+    ) {
+        if let Some(pipe) = audio_pipe.take() {
+            drop(pipe);
+        }
+        if let Some(agent) = dmx_agent.take() {
+            let _ = agent.set_colour(led::BLACK).await;
+            agent.stop().await;
+        }
     }
 }

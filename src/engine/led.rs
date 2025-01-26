@@ -8,6 +8,12 @@ pub const BLACK: Colour = Colour(Oklch::new_const(0.0, 0.0, OklabHue::new(0.0)))
 #[derive(Debug, Clone, Copy)]
 pub struct Colour(Oklch);
 
+impl Colour {
+    pub fn srgb(&self) -> Srgb<u8> {
+        Srgb::from_color(self.0).into_format()
+    }
+}
+
 impl FromStr for Colour {
     type Err = anyhow::Error; // TODO Concrete error
 
@@ -22,7 +28,7 @@ impl FromStr for Colour {
 impl fmt::Display for Colour {
     /// To hex, i.e. "#ffffff"
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let srgb: Srgb<u8> = Srgb::from_color(self.0).into_format();
+        let srgb = self.srgb();
         write!(f, "#{:02x}{:02x}{:02x}", srgb.red, srgb.green, srgb.blue)
     }
 }
@@ -117,6 +123,8 @@ pub struct Gradients {
     gradients: HashMap<String, Gradient>,
 }
 
+// TODO Add default gradients which can be overwritten
+//      by config files
 impl Gradients {
     pub fn new() -> Self {
         Self {
@@ -148,6 +156,14 @@ impl Gradients {
         self.current = Some(name.to_string());
 
         Ok(())
+    }
+
+    pub fn get_current(&self) -> Option<Gradient> {
+        if let Some(name) = &self.current {
+            self.gradients.get(name.as_str()).cloned()
+        } else {
+            None
+        }
     }
 
     pub fn get(&self, name: &str) -> anyhow::Result<Gradient> {
