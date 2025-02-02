@@ -260,10 +260,10 @@ impl Daemon {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        // Running the daemon involves two tasks:
+        // Running the daemon involves three tasks:
         //   1. Listen for commands from the HTTP API
         //   2. Manage the input-to-output audio streaming
-        //   3. Piping the calculated colour output via DMX
+        //   3. Manage the connection to a DMX device
 
         let local_set = task::LocalSet::new();
         local_set
@@ -447,13 +447,13 @@ impl Daemon {
         })
         .or_else(|e| {
             error!("Failed to start pipe"; "error" => format!("{:?}", e));
-            if let Some(pipe) = audio_pipe.take() {
-                drop(pipe);
-            }
 
             // If we failed to play audio, let the user know that the
             // playback failed. At this point we forcefully pause the
             // stream and wait for user input to continue playback
+            if let Some(pipe) = audio_pipe.take() {
+                drop(pipe);
+            }
             self.play_audio = false;
 
             Err(e)
