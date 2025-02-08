@@ -1,10 +1,4 @@
-use std::{
-    borrow::Cow,
-    fmt,
-    str::FromStr,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::{borrow::Cow, fmt, str::FromStr};
 
 use crate::engine::{self, audio, dmx, led};
 
@@ -21,7 +15,6 @@ use futures::TryFutureExt;
 use http::{header, HeaderMap, HeaderValue, StatusCode};
 use serde::{de, Deserialize, Deserializer};
 use slog_scope::error;
-use tokio::sync::mpsc;
 
 struct HtmlTemplate<T>(T);
 
@@ -90,7 +83,7 @@ where
     }
 }
 
-pub fn api(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine::Tx> {
+pub fn api() -> Router<engine::Tx> {
     #[derive(Deserialize)]
     struct ChangeDeviceRequest {
         #[serde(default, deserialize_with = "empty_string_as_none")]
@@ -259,10 +252,10 @@ pub fn api(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine
         change_request: Query<ChangeDeviceRequest>,
     ) -> impl IntoResponse {
         let set_output_res = if let Some(device) = change_request.0.device {
+            // This is a reserved device name which lets us
+            // know we should not be connected to any DMX
+            // device
             if device == "unselected" {
-                // This is a reserved device name which lets us
-                // know we should not be connected to any DMX
-                // device
                 engine_tx.set_dmx_output(None).await
             } else {
                 engine_tx.set_dmx_output(Some(device)).await
@@ -543,37 +536,6 @@ pub fn api(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine
         gradients_edited_resp(operation, "Failed to edit colour position.")
     }
 
-    let event_log = Arc::new(Mutex::new(Vec::new()));
-    let closure_event_log = Arc::clone(&event_log);
-    tokio::spawn(async move {
-        let log_retention = Duration::from_secs(5 * 60); // TODO Make configurable
-        while let Some(error) = engine_errors_rx.recv().await {
-            {
-                let now = Instant::now();
-                let mut log = closure_event_log.lock().unwrap();
-                log.push((format!("{error:?}"), now));
-                log.retain(|&(_, timestamp)| now.duration_since(timestamp) <= log_retention);
-            }
-            // Ensure the mutex is dropped post-event...
-        }
-    });
-
-    #[derive(Template)]
-    #[template(path = "logs.html")]
-    struct LogsTemplate<'a> {
-        logs: Vec<(&'a str, Instant)>,
-    }
-
-    let closure_event_log = Arc::clone(&event_log);
-    let log_retention = Duration::from_secs(5 * 60); // TODO Make configurable
-    let get_logs = move |State(_): State<engine::Tx>| async move {
-        let now = Instant::now();
-        let mut log = closure_event_log.lock().unwrap();
-        log.retain(|&(_, timestamp)| now.duration_since(timestamp) <= log_retention);
-        let logs = log.iter().map(|(s, t)| (s.as_ref(), *t)).collect();
-        HtmlTemplate(LogsTemplate { logs }).into_response()
-    };
-
     Router::new()
         .route("/audio/devices/input", get(get_audio_inputs))
         .route("/audio/devices/output", get(get_audio_outputs))
@@ -593,5 +555,4 @@ pub fn api(mut engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Router<engine
             "/led/gradients/:name/colours/:index/position",
             patch(edit_colour_position),
         )
-        .route("/logs", get(get_logs))
 }

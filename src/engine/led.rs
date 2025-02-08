@@ -123,16 +123,24 @@ pub struct Gradients {
     gradients: HashMap<String, Gradient>,
 }
 
-// TODO Add default gradients which can be overwritten
-//      by config files
-impl Gradients {
-    pub fn new() -> Self {
+impl Default for Gradients {
+    fn default() -> Self {
         Self {
-            current: None,
-            gradients: HashMap::new(),
+            current: Some(String::from("Piercing")),
+            gradients: HashMap::from([(
+                String::from("Piercing"),
+                Gradient {
+                    colours: vec![
+                        (Colour::from_str("#1152cb").unwrap(), 0.0),
+                        (Colour::from_str("#e4032f").unwrap(), 0.63869),
+                    ],
+                },
+            )]),
         }
     }
+}
 
+impl Gradients {
     pub fn info(&self) -> Vec<GradientInfo> {
         let mut info: Vec<GradientInfo> = vec![];
 

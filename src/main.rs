@@ -13,14 +13,14 @@ async fn main() {
     let logger = slog::Logger::root(drain, slog::o!());
     let _guard = slog_scope::set_global_logger(logger); // We must hold the guard due to how slog_scope works
 
-    let (daemon, daemon_cmd_tx, daemon_errors_rx) = match engine::Daemon::new() {
-        Ok((daemon, cmd_tx, err_rx)) => (daemon, cmd_tx, err_rx),
+    let (daemon, daemon_cmd_tx) = match engine::Daemon::new() {
+        Ok((daemon, cmd_tx)) => (daemon, cmd_tx),
         Err(e) => {
             error!("Failed to create daemon"; "error" => format!("{e}"));
             return;
         }
     };
-    let server = ui::Server::new(daemon_cmd_tx, daemon_errors_rx);
+    let server = ui::Server::new(daemon_cmd_tx);
 
     if let Err(e) = tokio::try_join!(server.run(), daemon.run()) {
         error!("Failed to run server/daemon"; "error" => format!("{e}"));

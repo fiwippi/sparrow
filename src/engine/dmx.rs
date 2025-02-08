@@ -12,7 +12,7 @@ use tokio_serial::{SerialPort, SerialPortBuilderExt, SerialStream};
 
 // Spec: https://www.erwinrol.com/page/articles/dmx512/
 
-const MAX_CHANNELS: usize = 512;
+const MAX_CHANNELS: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -64,9 +64,9 @@ async fn send_dmx_packet(port: &mut SerialStream, packet: Packet) -> anyhow::Res
     port.write(&data).await?;
 
     // The max speed that DMX can update at is about 44Hz which
-    // equates to 22.7 ms, we set the refresh rate a bit higher
-    // than this for stability, (otherwise the lights flicker)
-    time::sleep(Duration::from_millis(35).saturating_sub(start.elapsed())).await;
+    // equates to 22.7 ms, but, since we send less than 512
+    // channels per-packet we can go quicker
+    time::sleep(Duration::from_millis(5).saturating_sub(start.elapsed())).await;
 
     Ok(())
 }

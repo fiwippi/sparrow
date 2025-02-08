@@ -11,7 +11,7 @@ use axum::{
     Router,
 };
 use slog_scope::{error, info};
-use tokio::{signal, sync::mpsc};
+use tokio::signal;
 
 pub struct Server {
     app: Router,
@@ -19,12 +19,12 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(engine_tx: engine::Tx, engine_errors_rx: mpsc::Receiver<anyhow::Error>) -> Self {
+    pub fn new(engine_tx: engine::Tx) -> Self {
         Self {
             app: Router::new()
                 .route("/", get(routes::home))
                 .nest("/assets", routes::assets())
-                .nest("/api/v1", routes::api(engine_errors_rx))
+                .nest("/api/v1", routes::api())
                 .with_state(engine_tx.clone())
                 .layer(middleware::from_fn(log_requests)),
             engine_tx,

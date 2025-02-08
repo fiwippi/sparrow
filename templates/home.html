@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width" />
     <title>Sparrow</title>
     <script src="/assets/htmx.min.js"></script>
-    <script src="/assets/sse.js"></script>
     <style>
     	html {
     		font-size: 18px;
@@ -117,7 +116,7 @@
     </style>
     <script>
       window.addEventListener("DOMContentLoaded", (event) => {
-          const el = document.getElementById('gradient-select');
+          const el = document.getElementById("gradient-select");
           el.addEventListener('htmx:configRequest', function(evt) {
             if (evt.detail.triggeringEvent.type !== "change")          
               evt.detail.parameters.delete("gradient")
@@ -170,7 +169,7 @@
         </p>
         <p hx-sync="this">
           <label for="gradient-select">Gradient:</label>
-          <select id="gradient-select" name="gradient" hx-get="/api/v1/led/gradients" hx-trigger="load,change, gradientsEdited from:body">
+          <select id="gradient-select" name="gradient" hx-get="/api/v1/led/gradients" hx-trigger="load,change,gradientsEdited from:body">
           </select>
           <button style="float: right" hx-delete="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Delete Gradient</button>
           <button style="float: right" hx-post="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Add Gradient</button>
@@ -180,12 +179,6 @@
             <div class="error" id="gradient-select-load-err"></div>
             <div class="error" id="gradient-select-change-err"></div>
           </div>
-        </p>
-        <!-- Logs -->
-        <hgroup>
-          <h3>Logs</h3>
-        </hgroup>
-        <p hx-get="/api/v1/logs" hx-trigger="load,every 5s">
         </p>
       </div>
     </div>

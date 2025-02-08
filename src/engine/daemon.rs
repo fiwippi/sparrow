@@ -219,7 +219,6 @@ pub enum PlaybackStatus {
 pub struct Daemon {
     // Command/Error exchange
     cmd_rx: mpsc::Receiver<Command>,
-    err_tx: mpsc::Sender<anyhow::Error>,
 
     // Audio
     input_device: String,
@@ -234,28 +233,25 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new() -> anyhow::Result<(Self, Tx, mpsc::Receiver<anyhow::Error>)> {
+    pub fn new() -> anyhow::Result<(Self, Tx)> {
         // To simplify configuration, we assume that the
         // user wants to use their default input devices
         // by default (as long as they exist)
         let (input_handle, output_handle) = audio::default_handles();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(32);
-        let (err_tx, err_rx) = mpsc::channel::<anyhow::Error>(32);
 
         Ok((
             Self {
                 cmd_rx,
-                err_tx,
                 input_device: input_handle.name()?,
                 output_device: output_handle.name()?,
                 input_handle,
                 output_handle,
                 play_audio: false,
-                gradients: led::Gradients::new(),
+                gradients: led::Gradients::default(),
                 dmx_port: None,
             },
             Tx(cmd_tx),
-            err_rx,
         ))
     }
 
@@ -436,7 +432,6 @@ impl Daemon {
             LATENCY_MS,
             dmx_agent.clone(),
             gradient,
-            self.err_tx.clone(),
         )
         .and_then(|p| {
             if let Some(pipe) = audio_pipe.take() {

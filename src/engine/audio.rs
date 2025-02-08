@@ -1,4 +1,8 @@
-use std::{fmt, sync::Mutex};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use super::{dmx, led};
 
@@ -9,10 +13,9 @@ use cpal::{
 use num_complex::Complex;
 use ringbuf::{
     traits::{Consumer, Producer, Split},
-    HeapRb,
+    CachingProd, HeapRb,
 };
 use slog_scope::error;
-use tokio::sync::mpsc;
 
 /// Returns (input device, output device)
 pub fn default_handles() -> (cpal::Device, cpal::Device) {
@@ -100,11 +103,18 @@ impl Pipe {
         latency_ms: f32,
         dmx_agent: Option<dmx::SerialAgent>,
         gradient: led::Gradient,
-        errors: mpsc::Sender<anyhow::Error>,
     ) -> anyhow::Result<Self> {
         // We use the same configurations between the input
         // and output stream to simplify the logic
-        let config: cpal::StreamConfig = input_handle.default_input_config()?.into();
+        let supported_config: cpal::SupportedStreamConfig = input_handle.default_input_config()?;
+        let mut config: cpal::StreamConfig = supported_config.config();
+        if let cpal::SupportedBufferSize::Range { min, max: _ } = supported_config.buffer_size() {
+            // If the buffer isn't small, we must wait a long time for the OS
+            // tp buffer the audio data to the size we want instead of doing
+            // it ourselves, which means we can't interpolate LED lights in
+            // the meantime
+            config.buffer_size = cpal::BufferSize::Fixed(u32::max(*min, 256));
+        }
 
         // Create a delay in case the input and output
         // devices aren't synced
@@ -122,20 +132,93 @@ impl Pipe {
             producer.try_push(0.0).unwrap();
         }
 
-        let input_buffer = Mutex::new(Vec::<f32>::new());
-        let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let samples_written = producer.push_slice(data);
-            if samples_written > 0 {
-                let mut buf = input_buffer.lock().unwrap();
-                buf.extend_from_slice(&data[..samples_written]);
-                if buf.len() < 8096 {
-                    // TODO Make configurable
-                    return;
-                }
+        Ok(Self {
+            input_stream: input_handle.build_input_stream(
+                &config,
+                input_callback(producer, config.sample_rate, dmx_agent, gradient),
+                move |err: cpal::StreamError| {
+                    error!("Input stream error"; "error" => format!("{:?}", err));
+                },
+                None,
+            )?,
+            output_stream: output_handle.build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    for sample in data {
+                        *sample = consumer.try_pop().unwrap_or_else(|| 0.0);
+                    }
+                },
+                move |err: cpal::StreamError| {
+                    error!("Output stream error"; "error" => format!("{:?}", err));
+                },
+                None,
+            )?,
+        })
+    }
+
+    pub fn play(&self) -> anyhow::Result<()> {
+        self.input_stream.play()?;
+        self.output_stream.play()?;
+
+        Ok(())
+    }
+}
+
+fn input_callback(
+    mut producer: CachingProd<Arc<HeapRb<f32>>>,
+    sample_rate: cpal::SampleRate,
+    dmx_agent: Option<dmx::SerialAgent>,
+    gradient: led::Gradient,
+) -> impl FnMut(&[f32], &cpal::InputCallbackInfo) {
+    // These constants are used to define how the calculated
+    // FFT frequency is converted into a colour which looks
+    // nice, they are a bit magic, let's not change them
+    const TOTAL_HUES: f32 = 320.0;
+    const MAX_FREQ: f32 = 2500.0;
+    const MAX_USEFUL_FREQ: f32 = 1200.0;
+    const USEFUL_FREQ_HUE: f32 = 310.0;
+    const MIN_PERIOD: Duration = Duration::from_millis(250);
+
+    struct Data {
+        // We perform FFT calculations from this buffer
+        buffer: Vec<f32>,
+        // The max frequency of last buffer
+        freq: f32,
+        // The max frequency of last - 1 buffer
+        old_freq: f32,
+        // Time taken between FFT calculations
+        period: Duration,
+        // Instant the FFT was last calculated
+        last_calculated: Instant,
+        // Instant we last interpolated a colour
+        last_interpolated: Instant,
+    }
+    let fft_state = Mutex::new(Data {
+        buffer: Vec::new(),
+        freq: 0.0,
+        old_freq: 0.0,
+        period: Duration::new(0, 0),
+        last_calculated: Instant::now(),
+        last_interpolated: Instant::now(),
+    });
+
+    move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        let mut state = fft_state.lock().unwrap();
+
+        let samples_written = producer.push_slice(data);
+        if samples_written > 0 {
+            state.buffer.extend_from_slice(&data[..samples_written]);
+            // The lower the MIN_PERIOD the smaller the buffer size used
+            // to calculate the FFT, this will result in a more inaccurate
+            // calculation (larger error boundary)
+            if Instant::now().duration_since(state.last_calculated) > MIN_PERIOD {
+                state.period = Instant::now().duration_since(state.last_calculated);
+                state.last_calculated = Instant::now();
 
                 // Audio is interleaved, LRLRLR, so to mix
                 // down the samples into mono we do L+R/2
-                let mut mono: Vec<Complex<f32>> = buf
+                let mut mono: Vec<Complex<f32>> = state
+                    .buffer
                     .chunks_exact(2)
                     .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                     .map(|re| Complex::new(re, 0.0))
@@ -161,65 +244,37 @@ impl Pipe {
 
                     index as f32
                 };
-                let freq_bin = config.sample_rate.0 as f32 / mono.len() as f32;
-                let mut freq = index * freq_bin;
+                let freq_bin = sample_rate.0 as f32 / mono.len() as f32;
 
-                // TODO Add FFT dampening
-                // TODO Make MAX_FREQ configurable
-                const MAX_FREQ: f32 = 2000.0;
-                if freq > MAX_FREQ {
-                    freq = MAX_FREQ
-                }
+                state.old_freq = state.freq;
+                state.freq = f32::min(index * freq_bin, MAX_FREQ);
 
-                if let Some(agent) = &dmx_agent {
-                    let colour = gradient.interpolate(freq / MAX_FREQ);
-                    if let Err(e) = agent.blocking_set_colour(colour) {
-                        error!("Failed to set LED colour"; "error" => format!("{:?}", e))
-                    }
-                }
-
-                buf.clear();
+                state.buffer.clear();
             }
+        }
+
+        // To make the colour change smoother, we dampen the frequency
+        let delta = Instant::now().duration_since(state.last_interpolated);
+        let ratio = delta.as_nanos() as f32 / state.period.as_nanos() as f32;
+        let interpolated_freq = state.old_freq + (ratio.sqrt() * (state.freq - state.old_freq));
+
+        state.last_interpolated = Instant::now();
+
+        // This is an artifact of when the visualisation system used to
+        // be HSV-only, but we're keeping it because it creates a nice
+        // smooth colour.
+        let hue = if interpolated_freq > MAX_USEFUL_FREQ {
+            USEFUL_FREQ_HUE + (TOTAL_HUES - USEFUL_FREQ_HUE) * (interpolated_freq / MAX_FREQ)
+        } else {
+            interpolated_freq / MAX_USEFUL_FREQ * USEFUL_FREQ_HUE
         };
-        let output_data_fn = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            for sample in data {
-                *sample = consumer.try_pop().unwrap_or_else(|| 0.0);
+        let colour = gradient.interpolate(hue / TOTAL_HUES);
+
+        // Boom! Send the colour
+        if let Some(agent) = &dmx_agent {
+            if let Err(e) = agent.blocking_set_colour(colour) {
+                error!("Failed to set LED colour"; "error" => format!("{:?}", e))
             }
-        };
-
-        let input_err_events = errors.clone();
-        let input_err_fn = move |err: cpal::StreamError| {
-            if let Err(e) = input_err_events.blocking_send(err.into()) {
-                error!("Failed to send event"; "event" => format!("{:?}", e))
-            }
-        };
-        let output_err_events = errors.clone();
-        let output_err_fn = move |err: cpal::StreamError| {
-            if let Err(e) = output_err_events.blocking_send(err.into()) {
-                error!("Failed to send event"; "event" => format!("{:?}", e))
-            }
-        };
-
-        Ok(Self {
-            input_stream: input_handle.build_input_stream(
-                &config,
-                input_data_fn,
-                input_err_fn,
-                None,
-            )?,
-            output_stream: output_handle.build_output_stream(
-                &config,
-                output_data_fn,
-                output_err_fn,
-                None,
-            )?,
-        })
-    }
-
-    pub fn play(&self) -> anyhow::Result<()> {
-        self.input_stream.play()?;
-        self.output_stream.play()?;
-
-        Ok(())
+        }
     }
 }
