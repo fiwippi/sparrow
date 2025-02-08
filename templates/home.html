@@ -151,7 +151,6 @@
           <button id="audio-status-button" hx-get="/api/v1/audio/status/toggle" hx-trigger="click" hx-swap="none">
             Toggle
           </button>
-          <!-- TODO This box should be hidden when empty -->
           <div class="error-box">
             <div class="error" id="audio-status-err"></div>
             <div class="error" id="audio-status-toggle-err"></div>
@@ -174,7 +173,6 @@
           <button style="float: right" hx-delete="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Delete Gradient</button>
           <button style="float: right" hx-post="/api/v1/led/gradients" hx-prompt="Enter a name" hx-swap="none">Add Gradient</button>
           <div id="gradient-editor" style="margin-left: 10px"></div>
-          <!-- TODO This box should be hidden when empty -->
           <div class="error-box">
             <div class="error" id="gradient-select-load-err"></div>
             <div class="error" id="gradient-select-change-err"></div>

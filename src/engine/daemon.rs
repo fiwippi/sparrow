@@ -1,6 +1,6 @@
 use super::{audio, dmx, led};
 
-use anyhow::anyhow; // TODO Remove anyhow
+use anyhow::anyhow;
 use cpal::traits::DeviceTrait;
 use slog_scope::error;
 use tokio::{
@@ -8,7 +8,7 @@ use tokio::{
     task,
 };
 
-type Ack<T> = oneshot::Sender<anyhow::Result<T>>; // TODO Remove anyhow
+type Ack<T> = oneshot::Sender<anyhow::Result<T>>;
 
 #[derive(Debug)]
 pub enum Command {
@@ -40,7 +40,7 @@ pub enum Command {
         tx: Ack<()>,
     },
     GetGradient {
-        name: String, // TODO &str
+        name: String,
         tx: Ack<led::Gradient>,
     },
     AddGradient {
@@ -50,7 +50,7 @@ pub enum Command {
         tx: Ack<()>,
     },
     DeleteGradient {
-        name: String, // TODO &str
+        name: String,
         tx: Ack<()>,
     },
     ListDMXOutputs {
@@ -453,6 +453,7 @@ impl Daemon {
         })
     }
 
+    // TODO Ctrl-C isn't always cutting off the audio daemon
     async fn cleanup_audio(
         &mut self,
         audio_pipe: &mut Option<audio::Pipe>,

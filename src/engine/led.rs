@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, str::FromStr};
 
-use anyhow::anyhow; // TODO Concrete errors
+use anyhow::anyhow;
 use palette::{oklch::Oklch, FromColor, Mix, OklabHue, Srgb};
 
 pub const BLACK: Colour = Colour(Oklch::new_const(0.0, 0.0, OklabHue::new(0.0)));
@@ -15,7 +15,7 @@ impl Colour {
 }
 
 impl FromStr for Colour {
-    type Err = anyhow::Error; // TODO Concrete error
+    type Err = anyhow::Error;
 
     /// From hex, i.e. "#ffffff"
     fn from_str(s: &str) -> Result<Self, Self::Err> {
