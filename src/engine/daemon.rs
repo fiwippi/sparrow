@@ -208,8 +208,6 @@ impl Tx {
     }
 }
 
-const LATENCY_MS: f32 = 300.0; // TODO Make configurable via config
-
 #[derive(Debug)]
 pub enum PlaybackStatus {
     Playing,
@@ -429,7 +427,7 @@ impl Daemon {
         audio::Pipe::new(
             &self.input_handle,
             &self.output_handle,
-            LATENCY_MS,
+            300.0,
             dmx_agent.clone(),
             gradient,
         )
