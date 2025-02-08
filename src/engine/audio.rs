@@ -110,7 +110,7 @@ impl Pipe {
         let mut config: cpal::StreamConfig = supported_config.config();
         if let cpal::SupportedBufferSize::Range { min, max: _ } = supported_config.buffer_size() {
             // If the buffer isn't small, we must wait a long time for the OS
-            // tp buffer the audio data to the size we want instead of doing
+            // to buffer the audio data to the size we want instead of doing
             // it ourselves, which means we can't interpolate LED lights in
             // the meantime
             config.buffer_size = cpal::BufferSize::Fixed(u32::max(*min, 256));
