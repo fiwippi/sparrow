@@ -215,7 +215,7 @@ pub enum PlaybackStatus {
 }
 
 pub struct Daemon {
-    // Command/Error exchange
+    // Command exchange
     cmd_rx: mpsc::Receiver<Command>,
 
     // Audio
