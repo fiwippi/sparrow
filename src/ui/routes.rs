@@ -44,9 +44,23 @@ pub async fn home() -> impl IntoResponse {
     HtmlTemplate(HomeTemplate {})
 }
 
-pub fn assets() -> Router<engine::Tx> {
-    // TODO Create a favicon.ico route
+pub async fn favicon() -> impl IntoResponse {
+    const FAVICON_FILE: &[u8] = include_bytes!("../../assets/favicon.ico");
 
+    match Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/x-icon")
+        .body(Body::from(Bytes::from_static(FAVICON_FILE)))
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!("Failed to serve favicon asset"; "error" => format!("{e}"));
+            (StatusCode::INTERNAL_SERVER_ERROR, "").into_response()
+        }
+    }
+}
+
+pub fn assets() -> Router<engine::Tx> {
     const HTMX_JS_FILE: &[u8] = include_bytes!("../../assets/htmx.min.js");
 
     async fn get_htmx() -> impl IntoResponse {

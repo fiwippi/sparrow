@@ -23,6 +23,7 @@ impl Server {
         Self {
             app: Router::new()
                 .route("/", get(routes::home))
+                .route("/favicon.ico", get(routes::favicon))
                 .nest("/assets", routes::assets())
                 .nest("/api/v1", routes::api())
                 .with_state(engine_tx.clone())
