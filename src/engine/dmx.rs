@@ -64,9 +64,9 @@ async fn send_dmx_packet(port: &mut SerialStream, packet: Packet) -> anyhow::Res
     port.write(&data).await?;
 
     // The max speed that DMX can update at is about 44Hz which
-    // equates to 22.7 ms, but, since we send less than 512
-    // channels per-packet we can go quicker
-    time::sleep(Duration::from_millis(5).saturating_sub(start.elapsed())).await;
+    // equates to 22.7 ms, (but, since we send less than 512
+    // channels per-packet we can go quicker if needed)
+    time::sleep(Duration::from_micros(22_700).saturating_sub(start.elapsed())).await;
 
     Ok(())
 }

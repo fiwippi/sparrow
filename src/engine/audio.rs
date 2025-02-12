@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -190,21 +190,16 @@ fn input_callback(
         period: Duration,
         // Instant the FFT was last calculated
         last_calculated: Instant,
-        // Instant we last interpolated a colour
-        last_interpolated: Instant,
     }
-    let fft_state = Mutex::new(Data {
+    let mut state = Data {
         buffer: Vec::new(),
         freq: 0.0,
         old_freq: 0.0,
         period: Duration::new(0, 0),
         last_calculated: Instant::now(),
-        last_interpolated: Instant::now(),
-    });
+    };
 
     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-        let mut state = fft_state.lock().unwrap();
-
         let samples_written = producer.push_slice(data);
         if samples_written > 0 {
             state.buffer.extend_from_slice(&data[..samples_written]);
@@ -254,11 +249,9 @@ fn input_callback(
         }
 
         // To make the colour change smoother, we dampen the frequency
-        let delta = Instant::now().duration_since(state.last_interpolated);
+        let delta = Instant::now().duration_since(state.last_calculated);
         let ratio = delta.as_nanos() as f32 / state.period.as_nanos() as f32;
-        let interpolated_freq = state.old_freq + (ratio.sqrt() * (state.freq - state.old_freq));
-
-        state.last_interpolated = Instant::now();
+        let interpolated_freq = state.old_freq + ratio.sqrt() * (state.freq - state.old_freq);
 
         // This is an artifact of when the visualisation system used to
         // be HSV-only, but we're keeping it because it creates a nice
