@@ -23,7 +23,7 @@ pub enum Command {
         tx: Ack<()>,
     },
     SetAudioOutput {
-        device_name: String,
+        device_name: Option<String>,
         tx: Ack<()>,
     },
     GetAudioStatus {
@@ -96,7 +96,7 @@ impl Tx {
         Ok(())
     }
 
-    pub async fn set_audio_output(&self, device_name: String) -> anyhow::Result<()> {
+    pub async fn set_audio_output(&self, device_name: Option<String>) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         let (tx, rx) = (Command::SetAudioOutput { device_name, tx }, rx);
 
@@ -220,9 +220,9 @@ pub struct Daemon {
 
     // Audio
     input_device: String,
-    output_device: String,
     input_handle: cpal::Device,
-    output_handle: cpal::Device,
+    output_device: Option<String>,
+    output_handle: Option<cpal::Device>,
     play_audio: bool,
 
     // LEDs
@@ -242,9 +242,9 @@ impl Daemon {
             Self {
                 cmd_rx,
                 input_device: input_handle.name()?,
-                output_device: output_handle.name()?,
+                output_device: Some(output_handle.name()?),
                 input_handle,
-                output_handle,
+                output_handle: Some(output_handle),
                 play_audio: false,
                 gradients: led::Gradients::default(),
                 dmx_port: None,
@@ -277,7 +277,7 @@ impl Daemon {
                             let _ = tx.send(audio::input_device_info(name));
                         }
                         ListAudioOutputs { tx } => {
-                            let name = Some(self.output_device.as_str());
+                            let name = self.output_device.as_deref();
                             let _ = tx.send(audio::output_device_info(name));
                         }
                         SetAudioInput { device_name, tx } => {
@@ -304,25 +304,31 @@ impl Daemon {
                             let _ = tx.send(resp);
                         }
                         SetAudioOutput { device_name, tx } => {
-                            let resp = audio::output_device_info(None)
-                                .and_then(|devices| {
-                                    devices
-                                        .into_iter()
-                                        .find(|d| d.name == device_name)
-                                        .ok_or(anyhow!("device not found: {}", device_name))
-                                })
-                                .and_then(|d| {
-                                    self.output_device = d.name;
-                                    self.output_handle = d.handle;
-                                    Ok(())
-                                })
-                                .and_then(|_| {
-                                    if self.play_audio {
-                                        self.play_audio(&mut audio_pipe, &dmx_agent)
-                                    } else {
+                            let resp = if let Some(name) = device_name {
+                                audio::output_device_info(None)
+                                    .and_then(|devices| {
+                                        devices
+                                            .into_iter()
+                                            .find(|d| d.name == name)
+                                            .ok_or(anyhow!("device not found: {}", name))
+                                    })
+                                    .and_then(|d| {
+                                        self.output_device = Some(d.name);
+                                        self.output_handle = Some(d.handle);
                                         Ok(())
-                                    }
-                                });
+                                    })
+                            } else {
+                                self.output_device = None;
+                                self.output_handle = None;
+                                Ok(())
+                            }
+                            .and_then(|_| {
+                                if self.play_audio {
+                                    self.play_audio(&mut audio_pipe, &dmx_agent)
+                                } else {
+                                    Ok(())
+                                }
+                            });
 
                             let _ = tx.send(resp);
                         }
@@ -423,10 +429,15 @@ impl Daemon {
             .gradients
             .get_current()
             .unwrap_or_else(|| led::Gradient::new());
+        let output_handle = if let Some(handle) = &self.output_handle {
+            Some(handle)
+        } else {
+            None
+        };
 
         audio::Pipe::new(
             &self.input_handle,
-            &self.output_handle,
+            output_handle,
             300.0,
             dmx_agent.clone(),
             gradient,

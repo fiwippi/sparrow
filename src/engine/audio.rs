@@ -93,13 +93,13 @@ pub fn output_device_info(current_output_device: Option<&str>) -> anyhow::Result
 
 pub struct Pipe {
     input_stream: cpal::Stream,
-    output_stream: cpal::Stream,
+    output_stream: Option<cpal::Stream>,
 }
 
 impl Pipe {
     pub fn new(
         input_handle: &cpal::Device,
-        output_handle: &cpal::Device,
+        output_handle: Option<&cpal::Device>,
         latency_ms: f32,
         dmx_agent: Option<dmx::SerialAgent>,
         gradient: led::Gradient,
@@ -132,16 +132,10 @@ impl Pipe {
             producer.try_push(0.0).unwrap();
         }
 
-        Ok(Self {
-            input_stream: input_handle.build_input_stream(
-                &config,
-                input_callback(producer, config.sample_rate, dmx_agent, gradient),
-                move |err: cpal::StreamError| {
-                    error!("Input stream error"; "error" => format!("{:?}", err));
-                },
-                None,
-            )?,
-            output_stream: output_handle.build_output_stream(
+        // If we don't want to perform loopback then an output
+        // stream won't be defined
+        let output_stream = if let Some(output_handle) = output_handle {
+            Some(output_handle.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     for sample in data {
@@ -152,13 +146,35 @@ impl Pipe {
                     error!("Output stream error"; "error" => format!("{:?}", err));
                 },
                 None,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            input_stream: input_handle.build_input_stream(
+                &config,
+                input_callback(
+                    producer,
+                    config.sample_rate,
+                    dmx_agent,
+                    gradient,
+                    output_handle.is_some(),
+                ),
+                move |err: cpal::StreamError| {
+                    error!("Input stream error"; "error" => format!("{:?}", err));
+                },
+                None,
             )?,
+            output_stream,
         })
     }
 
     pub fn play(&self) -> anyhow::Result<()> {
         self.input_stream.play()?;
-        self.output_stream.play()?;
+        if let Some(output_stream) = &self.output_stream {
+            output_stream.play()?;
+        }
 
         Ok(())
     }
@@ -169,6 +185,7 @@ fn input_callback(
     sample_rate: cpal::SampleRate,
     dmx_agent: Option<dmx::SerialAgent>,
     gradient: led::Gradient,
+    loopback: bool,
 ) -> impl FnMut(&[f32], &cpal::InputCallbackInfo) {
     // These constants are used to define how the calculated
     // FFT frequency is converted into a colour which looks
@@ -200,7 +217,14 @@ fn input_callback(
     };
 
     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-        let samples_written = producer.push_slice(data);
+        let samples_written = if loopback {
+            producer.push_slice(data)
+        } else {
+            // If we're not performing loopback then there's no
+            // point writing to the ringbuffer, we still do want
+            // to process the data however
+            data.len()
+        };
         if samples_written > 0 {
             state.buffer.extend_from_slice(&data[..samples_written]);
             // The lower the MIN_PERIOD the smaller the buffer size used

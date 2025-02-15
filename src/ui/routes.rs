@@ -165,7 +165,13 @@ pub fn api() -> Router<engine::Tx> {
         change_request: Query<ChangeDeviceRequest>,
     ) -> impl IntoResponse {
         let set_output_res = if let Some(device) = change_request.0.device {
-            engine_tx.set_audio_output(device).await
+            // This is a reserved device name which lets us
+            // know we should not loopback the input audio
+            if device == "unselected" {
+                engine_tx.set_audio_output(None).await
+            } else {
+                engine_tx.set_audio_output(Some(device)).await
+            }
         } else {
             Ok(())
         };
