@@ -33,7 +33,7 @@ impl Server {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:4181").await?;
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:4181").await?;
         info!("Listening on {:?}...", listener.local_addr().unwrap());
         axum::serve(listener, self.app)
             .with_graceful_shutdown(shutdown_signal(self.engine_tx.clone()))
