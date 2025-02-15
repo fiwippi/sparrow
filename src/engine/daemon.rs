@@ -453,7 +453,6 @@ impl Daemon {
         })
     }
 
-    // TODO Ctrl-C isn't always cutting off the audio daemon
     async fn cleanup_audio(
         &mut self,
         audio_pipe: &mut Option<audio::Pipe>,

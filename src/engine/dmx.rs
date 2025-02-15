@@ -12,7 +12,7 @@ use tokio_serial::{SerialPort, SerialPortBuilderExt, SerialStream};
 
 // Spec: https://www.erwinrol.com/page/articles/dmx512/
 
-const MAX_CHANNELS: usize = 4;
+const MAX_CHANNELS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -71,9 +71,14 @@ async fn send_dmx_packet(port: &mut SerialStream, packet: Packet) -> anyhow::Res
     Ok(())
 }
 
+enum Command {
+    SetColour(led::Colour),
+    Shutdown,
+}
+
 #[derive(Clone)]
 pub struct SerialAgent {
-    clr_tx: mpsc::Sender<led::Colour>,
+    cmd_tx: mpsc::Sender<Command>,
     close: Arc<Notify>,
 }
 
@@ -88,19 +93,27 @@ impl SerialAgent {
 
         // We pipe received colours until
         // the sending channel is closed
-        let (clr_tx, mut clr_rx) = mpsc::channel::<led::Colour>(32);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
         let close = Arc::new(Notify::new());
         let close2 = close.clone();
         tokio::spawn(async move {
             let mut pkt = Packet::new(0, 0, 0);
 
             use mpsc::error::TryRecvError;
+            use Command::*;
             loop {
-                match clr_rx.try_recv() {
-                    Ok(clr) => {
-                        let srgb = clr.srgb();
-                        pkt = Packet::new(srgb.red, srgb.green, srgb.blue);
-                    }
+                match cmd_rx.try_recv() {
+                    Ok(cmd) => match cmd {
+                        SetColour(clr) => {
+                            let srgb = clr.srgb();
+                            pkt = Packet::new(srgb.red, srgb.green, srgb.blue);
+                        }
+                        Shutdown => {
+                            info!("Colour channel disconnected, exiting...");
+                            close2.notify_one();
+                            return;
+                        }
+                    },
                     Err(TryRecvError::Empty) => {
                         // We just wait until the next colour is received,
                         // on the channel, in the meantime we make sure to
@@ -108,9 +121,7 @@ impl SerialAgent {
                         // will turn off
                     }
                     Err(TryRecvError::Disconnected) => {
-                        info!("Colour channel disconnected, exiting...");
-                        close2.notify_one();
-                        return;
+                        panic!("DMX cmd_rx unexpectedly disconnected");
                     }
                 }
 
@@ -120,21 +131,21 @@ impl SerialAgent {
             }
         });
 
-        Ok(Self { clr_tx, close })
+        Ok(Self { cmd_tx, close })
     }
 
     pub async fn stop(self) {
-        drop(self.clr_tx);
+        let _ = self.cmd_tx.send(Command::Shutdown).await;
         self.close.notified().await;
     }
 
     pub async fn set_colour(&self, colour: led::Colour) -> anyhow::Result<()> {
-        self.clr_tx.send(colour).await?;
+        self.cmd_tx.send(Command::SetColour(colour)).await?;
         Ok(())
     }
 
     pub fn blocking_set_colour(&self, colour: led::Colour) -> anyhow::Result<()> {
-        self.clr_tx.blocking_send(colour)?;
+        self.cmd_tx.blocking_send(Command::SetColour(colour))?;
         Ok(())
     }
 }

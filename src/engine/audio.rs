@@ -265,9 +265,10 @@ fn input_callback(
 
         // Boom! Send the colour
         if let Some(agent) = &dmx_agent {
-            if let Err(e) = agent.blocking_set_colour(colour) {
-                error!("Failed to set LED colour"; "error" => format!("{:?}", e))
-            }
+            // This would only fail if the channel is closed,
+            // this happens on Daemon shutdown so we can just
+            // ignore this
+            _ = agent.blocking_set_colour(colour)
         }
     }
 }
