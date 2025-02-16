@@ -96,6 +96,22 @@ pub struct Pipe {
     output_stream: Option<cpal::Stream>,
 }
 
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // It takes a while for CPAL to clean up the dropped streams,
+        // meaning the callbacks keep firing even after the pipe itself
+        // is dropped. Pausing the streams helps stop this
+        if let Err(e) = self.input_stream.pause() {
+            error!("Failed to drop input stream"; "error" => format!("{e:?}"))
+        }
+        if let Some(output_stream) = self.output_stream.take() {
+            if let Err(e) = output_stream.pause() {
+                error!("Failed to drop output stream"; "error" => format!("{e:?}"))
+            }
+        }
+    }
+}
+
 impl Pipe {
     pub fn new(
         input_handle: &cpal::Device,
