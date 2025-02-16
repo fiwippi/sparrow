@@ -15,7 +15,7 @@ use ringbuf::{
     traits::{Consumer, Producer, Split},
     CachingProd, HeapRb,
 };
-use slog_scope::error;
+use slog_scope::{error, trace};
 
 /// Returns (input device, output device)
 pub fn default_handles() -> (cpal::Device, cpal::Device) {
@@ -194,7 +194,11 @@ fn input_callback(
     const MAX_FREQ: f32 = 2500.0;
     const MAX_USEFUL_FREQ: f32 = 1200.0;
     const USEFUL_FREQ_HUE: f32 = 310.0;
-    const MIN_PERIOD: Duration = Duration::from_millis(250);
+    // Powers of 2 are quickest to calculate, regardless,
+    // a buffer size of 16384 gives us decimal accuracy,
+    // so we don't want to configure it any bigger
+    const BUFFER_SIZE: usize = 16384;
+    const MIN_PERIOD: Duration = Duration::from_millis(250); // Set to 0 to disable
 
     struct Data {
         // We perform FFT calculations from this buffer
@@ -217,6 +221,10 @@ fn input_callback(
     };
 
     move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        let format_time =
+            |start: Instant, end: Instant| -> String { format!("{:?}", end.duration_since(start)) };
+        let callback_start = Instant::now();
+
         let samples_written = if loopback {
             producer.push_slice(data)
         } else {
@@ -225,12 +233,28 @@ fn input_callback(
             // to process the data however
             data.len()
         };
+        let fft_start = Instant::now();
         if samples_written > 0 {
-            state.buffer.extend_from_slice(&data[..samples_written]);
-            // The lower the MIN_PERIOD the smaller the buffer size used
-            // to calculate the FFT, this will result in a more inaccurate
-            // calculation (larger error boundary)
-            if Instant::now().duration_since(state.last_calculated) > MIN_PERIOD {
+            // Buffer size affects the system in two ways:
+            //   - Sizes which are powers of 2 are quickest to calculate
+            //   - Larger sizes give more accurate FFT calculations
+            //
+            // For this reason, we prefer the size to be constant each FFT
+            // calculation, so that we can optimise for a buffer size which
+            // is larger but also gives us the quickest FFT calculation.
+            // Another symptom of randomly changing buffer sizes is that
+            // the accuracy bounds of the calculation change so even though
+            // the actual frequency remains constant, the LED frequency could
+            // change due to the changing error bounds.
+            //
+            // In some cases, we still want to wait a bit more time between
+            // FFT calculations so that we interpolate for longer, this is
+            // when MIN_PERIOD is used.
+            if state.buffer.len() < BUFFER_SIZE {
+                let capacity = BUFFER_SIZE - state.buffer.len();
+                let extension_length = usize::min(samples_written, capacity);
+                state.buffer.extend_from_slice(&data[..extension_length]);
+            } else if Instant::now().duration_since(state.last_calculated) > MIN_PERIOD {
                 state.period = Instant::now().duration_since(state.last_calculated);
                 state.last_calculated = Instant::now();
 
@@ -243,7 +267,9 @@ fn input_callback(
                     .map(|re| Complex::new(re, 0.0))
                     .collect();
 
+                let transform_start = Instant::now();
                 fourier::create_fft_f32(mono.len()).fft_in_place(&mut mono);
+                let transform_end = Instant::now();
 
                 // We only consider the first half of
                 // the samples because the FFT is mirrored
@@ -267,15 +293,24 @@ fn input_callback(
 
                 state.old_freq = state.freq;
                 state.freq = f32::min(index * freq_bin, MAX_FREQ);
+                trace!("Updated frequency"; 
+                    "freq" => state.freq, 
+                    "buffer_size" => state.buffer.len(), 
+                    "transform_duration" => format_time(transform_start, transform_end));
 
                 state.buffer.clear();
             }
         }
+        let fft_end = Instant::now();
 
         // To make the colour change smoother, we dampen the frequency
         let delta = Instant::now().duration_since(state.last_calculated);
         let ratio = delta.as_nanos() as f32 / state.period.as_nanos() as f32;
         let interpolated_freq = state.old_freq + ratio.sqrt() * (state.freq - state.old_freq);
+        trace!("Interpolated frequency";
+            "freq" => interpolated_freq, 
+            "delta" => format!{"{:?}", delta},
+            "period" => format!{"{:?}", state.period});
 
         // This is an artifact of when the visualisation system used to
         // be HSV-only, but we're keeping it because it creates a nice
@@ -288,11 +323,18 @@ fn input_callback(
         let colour = gradient.interpolate(hue / TOTAL_HUES);
 
         // Boom! Send the colour
+        let send_start = Instant::now();
         if let Some(agent) = &dmx_agent {
             // This would only fail if the channel is closed,
             // this happens on Daemon shutdown so we can just
             // ignore this
-            _ = agent.blocking_set_colour(colour)
+            _ = agent.set_colour(colour)
         }
+
+        let callback_end = Instant::now();
+        trace!("Input callback finished";
+             "fft" => format_time(fft_start, fft_end), 
+             "colour_send" => format_time(send_start, callback_end), 
+             "total" => format_time(callback_start, callback_end));
     }
 }

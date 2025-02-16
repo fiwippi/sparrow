@@ -352,7 +352,7 @@ impl Daemon {
                                 // so we don't stop the agent like we do in
                                 // .cleanup_audio()
                                 if let Some(agent) = &dmx_agent {
-                                    let _ = agent.set_colour(led::BLACK).await;
+                                    let _ = agent.set_colour(led::BLACK);
                                 }
                                 Ok(())
                             } else {
@@ -473,7 +473,7 @@ impl Daemon {
             drop(pipe);
         }
         if let Some(agent) = dmx_agent.take() {
-            let _ = agent.set_colour(led::BLACK).await;
+            let _ = agent.set_colour(led::BLACK);
             agent.stop().await;
         }
     }
