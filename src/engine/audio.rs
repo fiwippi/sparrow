@@ -15,7 +15,7 @@ use ringbuf::{
     traits::{Consumer, Producer, Split},
     CachingProd, HeapRb,
 };
-use slog_scope::{error, trace};
+use slog_scope::{error, info, trace};
 
 /// Returns (input device, output device)
 pub fn default_handles() -> (cpal::Device, cpal::Device) {
@@ -116,10 +116,17 @@ impl Pipe {
     pub fn new(
         input_handle: &cpal::Device,
         output_handle: Option<&cpal::Device>,
-        latency_ms: f32,
+        latency: Duration,
         dmx_agent: Option<dmx::SerialAgent>,
         gradient: led::Gradient,
+        buffer_size: usize,
+        min_period: Duration,
     ) -> anyhow::Result<Self> {
+        info!("Piping audio"; 
+            "latency" => format!("{latency:?}"),
+            "buffer_size" => buffer_size,
+            "min_period" => format!("{min_period:?}"));
+
         // We use the same configurations between the input
         // and output stream to simplify the logic
         let supported_config: cpal::SupportedStreamConfig = input_handle.default_input_config()?;
@@ -134,7 +141,7 @@ impl Pipe {
 
         // Create a delay in case the input and output
         // devices aren't synced
-        let latency_frames = (latency_ms / 1_000.0) * config.sample_rate.0 as f32;
+        let latency_frames = (latency.as_millis() as f32 / 1_000.0) * config.sample_rate.0 as f32;
         let latency_samples = latency_frames as usize * config.channels as usize;
 
         let ring = HeapRb::<f32>::new(latency_samples * 2);
@@ -176,6 +183,8 @@ impl Pipe {
                     dmx_agent,
                     gradient,
                     output_handle.is_some(),
+                    buffer_size,
+                    min_period,
                 ),
                 move |err: cpal::StreamError| {
                     error!("Input stream error"; "error" => format!("{:?}", err));
@@ -202,6 +211,8 @@ fn input_callback(
     dmx_agent: Option<dmx::SerialAgent>,
     gradient: led::Gradient,
     loopback: bool,
+    buffer_size: usize,
+    min_period: Duration,
 ) -> impl FnMut(&[f32], &cpal::InputCallbackInfo) {
     // These constants are used to define how the calculated
     // FFT frequency is converted into a colour which looks
@@ -210,11 +221,6 @@ fn input_callback(
     const MAX_FREQ: f32 = 2500.0;
     const MAX_USEFUL_FREQ: f32 = 1200.0;
     const USEFUL_FREQ_HUE: f32 = 310.0;
-    // Powers of 2 are quickest to calculate, regardless,
-    // a buffer size of 16384 gives us decimal accuracy,
-    // so we don't want to configure it any bigger
-    const BUFFER_SIZE: usize = 16384;
-    const MIN_PERIOD: Duration = Duration::from_millis(250); // Set to 0 to disable
 
     struct Data {
         // We perform FFT calculations from this buffer
@@ -237,7 +243,7 @@ fn input_callback(
     };
 
     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-        let format_time =
+        let format_duration =
             |start: Instant, end: Instant| -> String { format!("{:?}", end.duration_since(start)) };
         let callback_start = Instant::now();
 
@@ -266,11 +272,11 @@ fn input_callback(
             // In some cases, we still want to wait a bit more time between
             // FFT calculations so that we interpolate for longer, this is
             // when MIN_PERIOD is used.
-            if state.buffer.len() < BUFFER_SIZE {
-                let capacity = BUFFER_SIZE - state.buffer.len();
+            if state.buffer.len() < buffer_size {
+                let capacity = buffer_size - state.buffer.len();
                 let extension_length = usize::min(samples_written, capacity);
                 state.buffer.extend_from_slice(&data[..extension_length]);
-            } else if Instant::now().duration_since(state.last_calculated) > MIN_PERIOD {
+            } else if Instant::now().duration_since(state.last_calculated) > min_period {
                 state.period = Instant::now().duration_since(state.last_calculated);
                 state.last_calculated = Instant::now();
 
@@ -312,7 +318,7 @@ fn input_callback(
                 trace!("Updated frequency"; 
                     "freq" => state.freq, 
                     "buffer_size" => state.buffer.len(), 
-                    "transform_duration" => format_time(transform_start, transform_end));
+                    "transform_duration" => format_duration(transform_start, transform_end));
 
                 state.buffer.clear();
             }
@@ -349,8 +355,8 @@ fn input_callback(
 
         let callback_end = Instant::now();
         trace!("Input callback finished";
-             "fft" => format_time(fft_start, fft_end), 
-             "colour_send" => format_time(send_start, callback_end), 
-             "total" => format_time(callback_start, callback_end));
+             "fft" => format_duration(fft_start, fft_end), 
+             "colour_send" => format_duration(send_start, callback_end), 
+             "total" => format_duration(callback_start, callback_end));
     }
 }

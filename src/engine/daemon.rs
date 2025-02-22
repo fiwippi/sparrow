@@ -1,4 +1,6 @@
-use super::{audio, dmx, led};
+use std::time::Duration;
+
+use super::{audio, dmx, led, Config};
 
 use anyhow::anyhow;
 use cpal::traits::DeviceTrait;
@@ -215,7 +217,8 @@ pub enum PlaybackStatus {
 }
 
 pub struct Daemon {
-    // Command exchange
+    // Internals
+    config: Config,
     cmd_rx: mpsc::Receiver<Command>,
 
     // Audio
@@ -231,7 +234,7 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new() -> anyhow::Result<(Self, Tx)> {
+    pub fn new(config: Config) -> anyhow::Result<(Self, Tx)> {
         // To simplify configuration, we assume that the
         // user wants to use their default input devices
         // by default (as long as they exist)
@@ -240,6 +243,7 @@ impl Daemon {
 
         Ok((
             Self {
+                config,
                 cmd_rx,
                 input_device: input_handle.name()?,
                 output_device: Some(output_handle.name()?),
@@ -455,9 +459,11 @@ impl Daemon {
         audio::Pipe::new(
             &self.input_handle,
             output_handle,
-            300.0,
+            Duration::from_millis(300),
             dmx_agent.clone(),
             gradient,
+            self.config.buffer_size,
+            self.config.min_period,
         )
         .and_then(|p| {
             if let Some(pipe) = audio_pipe.take() {

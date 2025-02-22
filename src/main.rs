@@ -1,14 +1,23 @@
 mod engine;
 mod ui;
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use slog::Drain;
 use slog_scope::error;
 use tokio;
 
-#[derive(Parser, Debug)]
+#[derive(Debug, Clone, ValueEnum)]
+enum BufferSize {
+    XS = 1024,
+    S = 2048,
+    M = 4096,
+    L = 8192,
+    XL = 16384,
+  }
+
+#[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(
@@ -19,6 +28,21 @@ struct Args {
         ),
     )]
     log_level: String,
+
+    #[arg(
+        short = 'b',
+        long, 
+        value_enum,
+        default_value_t = BufferSize::XL,
+    )]
+    buffer_size: BufferSize,
+
+    #[arg(
+        short = 'p',
+        long, 
+        default_value_t = 250,
+    )]
+    min_period: u64,
 }
 
 #[tokio::main]
@@ -42,7 +66,11 @@ async fn main() {
     let guard = slog_scope::set_global_logger(logger);
     guard.cancel_reset();
 
-    let (daemon, daemon_cmd_tx) = match engine::Daemon::new() {
+    let config = engine::Config { 
+        buffer_size: args.buffer_size as usize,
+        min_period: Duration::from_millis(args.min_period),
+     };
+    let (daemon, daemon_cmd_tx) = match engine::Daemon::new(config) {
         Ok((daemon, cmd_tx)) => (daemon, cmd_tx),
         Err(e) => {
             error!("Failed to create daemon"; "error" => format!("{e}"));
