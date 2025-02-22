@@ -2,7 +2,7 @@ use super::{audio, dmx, led};
 
 use anyhow::anyhow;
 use cpal::traits::DeviceTrait;
-use slog_scope::error;
+use slog_scope::{error, info};
 use tokio::{
     sync::{mpsc, oneshot},
     task,
@@ -278,7 +278,24 @@ impl Daemon {
                         }
                         ListAudioOutputs { tx } => {
                             let name = self.output_device.as_deref();
-                            let _ = tx.send(audio::output_device_info(name));
+                            let device_info = audio::output_device_info(name);
+
+                            // In some cases, an audio device may be switched or
+                            // replaced, like the internal speaker audio becoming
+                            // external headphones audio. We can detect this if
+                            // we have a defined output device, but no stream
+                            // is marked as selected
+                            let device_selected = device_info
+                                .as_ref()
+                                .is_ok_and(|i| i.iter().map(|d| d.selected).any(|s| s == true));
+                            if name.is_some() && !device_selected {
+                                info!("Tearing down unselected device"; "name" => name);
+                                self.output_device = None;
+                                self.output_handle = None;
+                                self.cleanup_audio(&mut audio_pipe, &mut dmx_agent).await;
+                            }
+
+                            let _ = tx.send(device_info);
                         }
                         SetAudioInput { device_name, tx } => {
                             let resp = audio::input_device_info(None)
@@ -469,6 +486,7 @@ impl Daemon {
         audio_pipe: &mut Option<audio::Pipe>,
         dmx_agent: &mut Option<dmx::SerialAgent>,
     ) {
+        self.play_audio = false;
         if let Some(pipe) = audio_pipe.take() {
             drop(pipe);
         }

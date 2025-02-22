@@ -10,7 +10,7 @@ use axum::{
     routing::get,
     Router,
 };
-use slog_scope::{error, info};
+use slog_scope::{debug, error, info};
 use tokio::signal;
 
 pub struct Server {
@@ -81,7 +81,7 @@ async fn log_requests(request: Request, next: Next) -> impl IntoResponse {
     let elapsed = start.elapsed();
     let status = resp.status().to_string();
 
-    info!("Request"; "status" => status, "method" => method, "uri" => uri, "elapsed" => format!("{elapsed:?}"));
+    debug!("Request"; "status" => status, "method" => method, "uri" => uri, "elapsed" => format!("{elapsed:?}"));
 
     resp
 }
