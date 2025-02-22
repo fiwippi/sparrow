@@ -110,7 +110,23 @@ impl SerialAgent {
                 }
 
                 if let Err(e) = send_dmx_packet(&mut port, pkt).await {
-                    error!("Failed to send DMX packet"; "error" => format!("{:?}", e))
+                    error!("Failed to send DMX packet"; "error" => format!("{:?}", e));
+                    // Once a device is disconnected, even if it's reconnected we don't
+                    // have the logic to begin piping to it again (too complicated), so
+                    // we just abort the main loop
+                    if let Ok(e) = e.downcast::<tokio_serial::Error>() {
+                        // In some cases, we may get a disconnection error which
+                        // doesn't have the NoDevice kind, so we have to check
+                        // the description manually
+                        let a = e.kind == tokio_serial::ErrorKind::NoDevice;
+                        let b = e.description == "No such device or address";
+                        if a || b {
+                            error!("The DMX device does not exist, aborting DMX connection");
+                            // If we don't do this, the audio pipe will hang on close
+                            close2.notify_one();
+                            return;
+                        }
+                    }
                 }
             }
         });
