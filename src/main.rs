@@ -29,20 +29,27 @@ struct Args {
     )]
     log_level: String,
 
+    /// The size of the buffer used to calculate the final LED colour,
+    /// smaller values are quicker to process at the cost of reduced
+    /// accuracy
     #[arg(
         short = 'b',
         long, 
         value_enum,
         default_value_t = BufferSize::XL,
+        verbatim_doc_comment
     )]
     buffer_size: BufferSize,
 
+    /// How long a colour is interpolated before a new measurement is
+    /// taken, smaller values lead to rougher colour changes
     #[arg(
         short = 'p',
         long, 
         default_value_t = 250,
+        verbatim_doc_comment
     )]
-    min_period: u64,
+    interpolation_period: u64,
 }
 
 #[tokio::main]
@@ -68,7 +75,7 @@ async fn main() {
 
     let config = engine::Config { 
         buffer_size: args.buffer_size as usize,
-        min_period: Duration::from_millis(args.min_period),
+        min_period: Duration::from_millis(args.interpolation_period),
      };
     let (daemon, daemon_cmd_tx) = match engine::Daemon::new(config) {
         Ok((daemon, cmd_tx)) => (daemon, cmd_tx),
